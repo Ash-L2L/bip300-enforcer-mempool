@@ -1,0 +1,25 @@
+[package]
+name = "bip300-enforcer-mempool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+bitcoin = "0.32.2"
+blake3 = "1.5.3"
+borsh = "1.5.1"
+clap = { version = "4.5.15", features = ["derive"] }
+fallible-iterator = "0.3.0"
+futures = "0.3.30"
+hashlink = "0.9.1"
+ouroboros = "0.18.4"
+thiserror = "1.0.63"
+tokio = { version = "1.38.0", features = ["rt-multi-thread"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+zeromq = "0.4.0"
+
+[dependencies.bip300301]
+git = "https://github.com/Ash-L2L/bip300301.git"
+rev = "21160208740db046c7e12fa26753ce7cd7379a80"
+features = ["tracing"]
