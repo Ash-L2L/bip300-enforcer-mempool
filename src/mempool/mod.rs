@@ -1,113 +1,69 @@
-use std::collections::{hash_map, BTreeMap, HashMap};
+use std::collections::{btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bip300301::{
     bitcoin::hashes::Hash as _,
     client::{
-        GetRawMempoolClient as _, GetRawMempoolVerbose,
-        GetRawTransactionClient as _, GetRawTransactionVerbose,
-        MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose,
+        BlockTemplateTransaction, GetRawMempoolClient as _, GetRawMempoolVerbose, GetRawTransactionClient as _, GetRawTransactionVerbose, MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose
     },
     jsonrpsee::{core::ClientError as JsonRpcError, http_client::HttpClient},
 };
-use bitcoin::{hashes::Hash as _, BlockHash, Transaction, Txid};
-use fallible_iterator::FallibleIterator;
+use bitcoin::{absolute::Height, hashes::Hash as _, Block, BlockHash, Target, Transaction, Txid, Weight};
 use futures::{
     channel::mpsc,
     future::{try_join, Either},
     stream, StreamExt,
 };
 use hashlink::{LinkedHashMap, LinkedHashSet};
+use imbl::{ordmap, OrdMap, OrdSet};
+use indexmap::{IndexMap, IndexSet};
+use lending_iterator::LendingIterator;
 use thiserror::Error;
 
 use crate::zmq::{SequenceMessage, SequenceStream, SequenceStreamError};
 
 pub mod iter;
+pub mod iter_mut;
+mod sync;
 
-#[derive(Debug)]
+pub use sync::sync_mempool;
+
+#[derive(Clone, Copy, Debug, Eq)]
+pub struct FeeRate {
+    fee: u64,
+    size: u64
+}
+
+impl Ord for FeeRate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // (self.fee / self.size) > (other.fee / other.size) ==>
+        // (self.fee * other.size) > (other.fee * self.size)
+        let lhs = self.fee as u128 * other.size as u128;
+        let rhs = other.fee as u128 * self.size as u128;
+        lhs.cmp(&rhs) 
+    }
+}
+
+impl PartialEq for FeeRate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl PartialOrd for FeeRate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TxInfo {
     pub ancestor_size: u64,
     pub bip125_replaceable: bool,
-    /// Map of ancestors to digests of their tx info
-    pub depends: BTreeMap<Txid, blake3::Hash>,
+    pub depends: OrdSet<Txid>,
     pub descendant_size: u64,
     pub fees: RawMempoolTxFees,
-    /// Map of descendants to digests of their tx info
-    pub spent_by: BTreeMap<Txid, blake3::Hash>,
+    pub spent_by: OrdSet<Txid>,
     pub unbroadcast: bool,
-}
-
-impl TxInfo {
-    // Digest when used as an ancestor. Does not commit to descendants
-    pub fn digest_as_ancestor(&self) -> blake3::Hash {
-        let Self {
-            ancestor_size,
-            bip125_replaceable,
-            depends,
-            descendant_size: _,
-            fees,
-            spent_by: _,
-            unbroadcast,
-        } = self;
-        let RawMempoolTxFees {
-            base: base_fee,
-            modified: modified_fee,
-            ancestor: ancestor_fees,
-            descendant: _,
-        } = fees;
-        (|| {
-            let mut hasher = blake3::Hasher::new();
-            borsh::to_writer(&mut hasher, ancestor_size)?;
-            borsh::to_writer(&mut hasher, bip125_replaceable)?;
-            for (txid, digest) in depends {
-                borsh::to_writer(
-                    &mut hasher,
-                    &(txid.as_byte_array(), digest.as_bytes()),
-                )?;
-            }
-            borsh::to_writer(&mut hasher, base_fee)?;
-            borsh::to_writer(&mut hasher, modified_fee)?;
-            borsh::to_writer(&mut hasher, ancestor_fees)?;
-            borsh::to_writer(&mut hasher, unbroadcast)?;
-            borsh::io::Result::Ok(hasher.finalize())
-        })()
-        .unwrap()
-    }
-
-    // Digest when used as a descendant. Does not commit to ancestors
-    pub fn digest_as_descendant(&self) -> blake3::Hash {
-        let Self {
-            ancestor_size: _,
-            bip125_replaceable,
-            depends: _,
-            descendant_size,
-            fees,
-            spent_by,
-            unbroadcast,
-        } = self;
-        let RawMempoolTxFees {
-            base: base_fee,
-            modified: modified_fee,
-            ancestor: _,
-            descendant: descendant_fees,
-        } = fees;
-        (|| {
-            let mut hasher = blake3::Hasher::new();
-            borsh::to_writer(&mut hasher, bip125_replaceable)?;
-            borsh::to_writer(&mut hasher, descendant_size)?;
-            borsh::to_writer(&mut hasher, base_fee)?;
-            borsh::to_writer(&mut hasher, modified_fee)?;
-            borsh::to_writer(&mut hasher, descendant_fees)?;
-            for (txid, digest) in spent_by {
-                borsh::to_writer(
-                    &mut hasher,
-                    &(txid.as_byte_array(), digest.as_bytes()),
-                )?;
-            }
-            borsh::to_writer(&mut hasher, unbroadcast)?;
-            borsh::io::Result::Ok(hasher.finalize())
-        })()
-        .unwrap()
-    }
 }
 
 #[derive(Debug, Error)]
@@ -117,20 +73,145 @@ pub struct MissingAncestorError {
     pub missing: Txid,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Error)]
+#[error("Missing descendant for {tx}: {missing}")]
+pub struct MissingDescendantError {
+    pub tx: Txid,
+    pub missing: Txid,
+}
+
+#[derive(Debug, Error)]
+#[error("Missing descendants key: {0}")]
+pub struct MissingDescendantsKeyError(Txid);
+
+#[derive(Debug, Error)]
+pub enum MempoolInsertError {
+    #[error(transparent)]
+    MissingAncestor(#[from] MissingAncestorError),
+    #[error(transparent)]
+    MissingDescendantsKey(#[from] MissingDescendantsKeyError),
+}
+
+#[derive(Debug, Error)]
+#[error("Missing by_ancestor_fee_rate key: {0:?}")]
+pub struct MissingByAncestorFeeRateKeyError(FeeRate);
+
+#[derive(Debug, Error)]
+pub enum MempoolRemoveError {
+    #[error(transparent)]
+    MissingAncestor(#[from] MissingAncestorError),
+    #[error(transparent)]
+    MissingByAncestorFeeRateKey(#[from] MissingByAncestorFeeRateKeyError),
+    #[error(transparent)]
+    MissingDescendant(#[from] MissingDescendantError),
+    #[error(transparent)]
+    MissingDescendantsKey(#[from] MissingDescendantsKeyError),
+}
+
+#[derive(Clone, Debug, Default)]
+struct ByAncestorFeeRate(OrdMap<FeeRate, LinkedHashSet<Txid>>);
+
+impl ByAncestorFeeRate {
+    fn insert(&mut self, fee_rate: FeeRate, txid: Txid) {
+        self.0.entry(fee_rate).or_default().insert(txid);
+    }
+
+    /// returns `true` if removed successfully, or `false` if not found
+    fn remove(&mut self, fee_rate: FeeRate, txid: Txid) -> bool {
+        match self.0.entry(fee_rate) {
+            ordmap::Entry::Occupied(mut entry) => {
+                let txs = entry.get_mut();
+                txs.remove(&txid);
+                if txs.is_empty() {
+                    entry.remove();
+                }
+                true
+            }
+            ordmap::Entry::Vacant(_) => {
+                false
+            }
+        }
+    }
+
+    // Iterate from low-to-high fee rate, in insertion order
+    fn iter(&self) -> impl DoubleEndedIterator<Item = (FeeRate, Txid)> + '_ {
+        self.0.iter().flat_map(|(fee_rate, txids)| txids.iter().map(|txid| (*fee_rate, *txid)))
+    }
+
+    // Iterate from high-to-low fee rate, in insertion order
+    fn iter_rev(&self) -> impl DoubleEndedIterator<Item = (FeeRate, Txid)> + '_ {
+        self.0.iter().rev().flat_map(|(fee_rate, txids)| txids.iter().map(|txid| (*fee_rate, *txid)))
+
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Chain {
+    tip: BlockHash,
+    blocks: imbl::HashMap<BlockHash, bip300301::client::Block>
+}
+
+impl Chain {
+    // Iterate over blocks from tip towards genesis.
+    // Not all history is guaranteed to exist, so this iterator might return
+    // `None` before the genesis block.
+    fn iter(&self) -> impl Iterator<Item = &bip300301::client::Block> {
+        let mut next = Some(self.tip);
+        std::iter::from_fn(move || {
+            if let Some(block) = self.blocks.get(&next?) {
+                next = block.previousblockhash;
+                Some(block)
+            } else {
+                next = None;
+                None
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct MempoolTxs(imbl::HashMap<Txid, (Transaction, TxInfo)>);
+
+// MUST be cheap to clone so that constructing block templates is cheap
+#[derive(Clone, Debug)]
 pub struct Mempool {
-    txs: HashMap<Txid, (Transaction, TxInfo)>,
+    by_ancestor_fee_rate: ByAncestorFeeRate,
+    chain: Chain,
+    txs: MempoolTxs,
 }
 
 impl Mempool {
+    fn new(prev_blockhash: BlockHash) -> Self {
+        let chain = Chain { tip: prev_blockhash, blocks: imbl::HashMap::new() };
+        Self { by_ancestor_fee_rate: ByAncestorFeeRate::default(),
+            chain, txs: MempoolTxs::default() }
+    }
+
+    pub fn tip(&self) -> &bip300301::client::Block {
+        &self.chain.blocks[&self.chain.tip]
+    }
+
+    pub fn tip_hash(&self) -> BlockHash {
+        self.chain.tip
+    }
+
+    pub fn tip_height(&self) -> u64 {
+        self.chain.blocks[&self.chain.tip].height as u64
+    }
+
+    pub fn next_target(&self) -> Target {
+        // FIXME: calculate this properly
+        self.chain.blocks[&self.chain.tip].compact_target.into()
+    }
+
     /// Insert with info already computed. For use during initial sync only.
     /// All ancestors must exist in the mempool.
-    /// Descendants are ignored.
+    /// Descendants must not exist.
     fn insert_with_info(
         &mut self,
         tx: Transaction,
         info: RawMempoolTxInfo,
-    ) -> Result<Option<TxInfo>, MissingAncestorError> {
+    ) -> Result<Option<TxInfo>, MempoolInsertError> {
         let txid = tx.compute_txid();
         let RawMempoolTxInfo {
             vsize,
@@ -147,33 +228,35 @@ impl Mempool {
             unbroadcast } = info;
         let depends = depends
             .into_iter()
-            .map(|dep_txid| {
-                let dep_txid = Txid::from_byte_array(dep_txid.to_byte_array());
-                let (_, dep_info) = self.txs.get(&dep_txid).ok_or_else(|| MissingAncestorError {
-                    tx: txid,
-                    missing: dep_txid
-                })?;
-                let dep_digest = dep_info.digest_as_ancestor();
-                Ok((dep_txid, dep_digest))
-            })
-            .collect::<Result<_, _>>()?;
+            .collect();
+        for dep in &depends {
+            self.txs.0.get_mut(dep).ok_or(MissingAncestorError {
+                tx: txid,
+                missing: *dep
+            })?
+            .1.spent_by.insert(txid);
+        };
         let info = TxInfo {
             ancestor_size,
             bip125_replaceable,
             depends,
             descendant_size: vsize,
             fees: RawMempoolTxFees { descendant: fees.modified, ..fees },
-            spent_by: BTreeMap::new(),
+            spent_by: OrdSet::new(),
             unbroadcast
         };
-        let res = self.txs.insert(txid, (tx, info)).map(|(_, info)| info);
+        let modified_fees = info.fees.modified;
+        let res = self.txs.0.insert(txid, (tx, info)).map(|(_, info)| info);
         let (mut ancestor_size, mut ancestor_fees) = (0, 0);
-        self.ancestors(txid).for_each(|(ancestor_tx, ancestor_info)| {
+        self.txs.ancestors_mut(txid).try_for_each(|ancestor_info| {
+            let (ancestor_tx, ancestor_info) = ancestor_info?;
             ancestor_size += ancestor_tx.vsize() as u64;
             ancestor_fees += ancestor_info.fees.modified;
-            Ok(())
+            ancestor_info.descendant_size += vsize;
+            ancestor_info.fees.descendant += modified_fees;
+            Result::<_, MempoolInsertError>::Ok(())
         })?;
-        let (_, info) = self.txs.get_mut(&txid).unwrap();
+        let (_, info) = self.txs.0.get_mut(&txid).unwrap();
         if ancestor_size != info.ancestor_size {
             tracing::warn!(
                 %txid,
@@ -192,197 +275,125 @@ impl Mempool {
             );
             info.fees.ancestor = ancestor_fees;
         }
+        let ancestor_fee_rate = FeeRate {
+            fee: ancestor_fees,
+            size: ancestor_size
+        };
+        self.by_ancestor_fee_rate.insert(ancestor_fee_rate, txid);
         Ok(res)
     }
 
-    fn remove(&mut self, txid: &Txid) -> Option<(Transaction, TxInfo)> {
-        let (tx, info) = self.txs.remove(txid)?;
-        // FIXME
-        Some((tx, info))
+    /// Remove a tx from the mempool. Descendants are updated but not removed.
+    fn remove(&mut self, txid: &Txid) -> Result<Option<(Transaction, TxInfo)>, MempoolRemoveError> {
+        let (tx, info) = self.txs.0.get(txid).ok_or(MissingDescendantsKeyError(*txid))?;
+        let ancestor_size = info.ancestor_size;
+        let vsize = tx.vsize() as u64;
+        let fees = RawMempoolTxFees {
+            ..info.fees
+        };
+        let mut descendants = self.txs.descendants_mut(*txid);
+        // Skip first element
+        let _: Option<_> = descendants.next().transpose()?;
+        let () = descendants.try_for_each(|desc| {
+            let (desc_tx, desc_info) = desc?;
+            let ancestor_fee_rate = FeeRate {
+                fee: desc_info.fees.ancestor,
+                size: desc_info.ancestor_size,
+            };
+            let desc_txid = desc_tx.compute_txid();
+            if !self.by_ancestor_fee_rate.remove(ancestor_fee_rate, desc_txid) {
+                let err = MissingByAncestorFeeRateKeyError(ancestor_fee_rate);
+                return Err(err.into())
+            };
+            desc_info.ancestor_size -= vsize;
+            desc_info.fees.ancestor -= fees.modified;
+            let ancestor_fee_rate = FeeRate {
+                fee: desc_info.fees.ancestor,
+                size: desc_info.ancestor_size,
+            };
+            self.by_ancestor_fee_rate.insert(ancestor_fee_rate, desc_txid);
+            desc_info.depends.remove(txid);
+            Result::<_, MempoolRemoveError>::Ok(())
+        })?;
+        // Update all ancestors
+        let () = self.txs.ancestors_mut(*txid).try_for_each(|anc| {
+            let (_anc_tx, anc_info) = anc?;
+            anc_info.descendant_size -= vsize;
+            anc_info.fees.descendant -= fees.modified;
+            anc_info.spent_by.remove(txid);
+            Result::<_, MempoolRemoveError>::Ok(())
+        })?;
+        let ancestor_fee_rate = FeeRate {
+            fee: fees.ancestor,
+            size: ancestor_size
+        };
+        // Update `self.by_ancestor_fee_rate`
+        if !self.by_ancestor_fee_rate.remove(ancestor_fee_rate, *txid) {
+            let err = MissingByAncestorFeeRateKeyError(ancestor_fee_rate);
+            return Err(err.into())
+        };
+        Ok(self.txs.0.remove(txid))
     }
-}
 
-#[derive(Debug, Default)]
-struct MempoolSyncing {
-    blocks_needed: LinkedHashSet<BlockHash>,
-    mempool: Mempool,
-    txs_needed: LinkedHashSet<Txid>,
-}
-
-impl MempoolSyncing {
-    fn is_synced(&self) -> bool {
-        self.blocks_needed.is_empty() && self.txs_needed.is_empty()
-    }
-
-    fn next_rpc_request(
-        &self,
-    ) -> Option<Either<bip300301::bitcoin::BlockHash, bip300301::bitcoin::Txid>>
-    {
-        if let Some(block_hash) = self.blocks_needed.front() {
-            let block_hash = bip300301::bitcoin::BlockHash::from_byte_array(
-                *block_hash.as_byte_array(),
-            );
-            Some(Either::Left(block_hash))
-        } else if let Some(txid) = self.txs_needed.front() {
-            let txid = bip300301::bitcoin::Txid::from_byte_array(
-                *txid.as_byte_array(),
-            );
-            Some(Either::Right(txid))
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum SyncMempoolError {
-    #[error("Error deserializing tx")]
-    DeserializeTx(#[from] bitcoin::consensus::encode::FromHexError),
-    #[error("RPC error")]
-    JsonRpc(#[from] JsonRpcError),
-    #[error("Sequence stream error")]
-    SequenceStream(#[from] SequenceStreamError),
-    #[error("Sequence stream ended unexpectedly")]
-    SequenceStreamEnded,
-}
-
-fn txs_needed(raw_mempool_verbose: &RawMempoolVerbose) -> LinkedHashSet<Txid> {
-    fn insert_ancestors_first(
-        txid: &bip300301::bitcoin::Txid,
-        mempool_tx_infos: &LinkedHashMap<
-            bip300301::bitcoin::Txid,
-            &RawMempoolTxInfo,
-        >,
-        txs_needed: &mut LinkedHashSet<Txid>,
-    ) {
-        let tx_info = mempool_tx_infos[txid];
-        for ancestor in &tx_info.depends {
-            insert_ancestors_first(ancestor, mempool_tx_infos, txs_needed);
-            let txid = Txid::from_byte_array(*txid.as_byte_array());
-            let _: Option<Txid> = txs_needed.replace(txid);
-        }
-    }
-    let mempool_tx_infos: LinkedHashMap<bip300301::bitcoin::Txid, _> =
-        raw_mempool_verbose
-            .entries
-            .iter()
-            .map(|(txid, tx_info)| (*txid, tx_info))
-            .collect();
-    let mut res = LinkedHashSet::new();
-    for txid in mempool_tx_infos.keys() {
-        insert_ancestors_first(txid, &mempool_tx_infos, &mut res);
-    }
-    res
-}
-
-pub async fn sync_mempool(
-    rpc_client: &HttpClient,
-    sequence_stream: &mut SequenceStream<'_>,
-) -> Result<Mempool, SyncMempoolError> {
-    let raw_mempool_verbose: RawMempoolVerbose = rpc_client
-        .get_raw_mempool(GetRawMempoolVerbose::<true>)
-        .await?;
-    let mut sync_state = MempoolSyncing {
-        txs_needed: txs_needed(&raw_mempool_verbose),
-        ..Default::default()
-    };
-    let (rpc_res_tx, rpc_res_rx) = mpsc::unbounded();
-    let mut pending_rpc_request = false;
-    let mut combined_stream = stream::select(
-        sequence_stream.map(Either::Left),
-        rpc_res_rx.map(Either::Right),
-    );
-    while !sync_state.is_synced() {
-        // FIXME: handle txs dropped from mempool after requesting and before
-        // receiving notification message
-        if !pending_rpc_request {
-            if let Some(next_rpc_request) = sync_state.next_rpc_request() {
-                tokio::spawn({
-                    let rpc_client = rpc_client.clone();
-                    let rpc_res_tx = rpc_res_tx.clone();
-                    async move {
-                        let res = match next_rpc_request {
-                            Either::Left(block_hash) => rpc_client
-                                .getblock(block_hash, Some(1))
-                                .await
-                                .map(Either::Left),
-                            Either::Right(txid) => try_join(
-                                rpc_client.get_raw_transaction(
-                                    txid,
-                                    GetRawTransactionVerbose::<false>,
-                                    None,
-                                ),
-                                rpc_client.get_mempool_entry(txid),
-                            )
-                            .await
-                            .map(Either::Right),
-                        };
-                        let () = rpc_res_tx.unbounded_send(res).unwrap_or_else(|err| {
-                            let err = anyhow::Error::from(err);
-                            tracing::error!(
-                                "Failed to push `getrawtransaction` response: {err:#}"
-                            );
-                        });
-                    }
-                });
-                pending_rpc_request = true;
-            }
-        }
-        match combined_stream
-            .next()
-            .await
-            .ok_or(SyncMempoolError::SequenceStreamEnded)?
-        {
-            Either::Left(sequence_msg) => match sequence_msg? {
-                SequenceMessage::BlockHashConnected(block_hash) => {
-                    let _: Option<BlockHash> =
-                        sync_state.blocks_needed.replace(block_hash);
-                }
-                SequenceMessage::BlockHashDisconnected(_) => (),
-                SequenceMessage::TxHashAdded {
-                    txid,
-                    mempool_seq: _,
-                } => {
-                    let _: Option<Txid> = sync_state.txs_needed.replace(txid);
-                }
-                SequenceMessage::TxHashRemoved {
-                    txid,
-                    mempool_seq: _,
-                } => {
-                    sync_state.mempool.remove(&txid);
-                }
-            },
-            Either::Right(rpc_res) => {
-                pending_rpc_request = false;
-                match rpc_res? {
-                    Either::Left(block) => {
-                        // Remove txs from connected block
-                        for txid in block.tx {
-                            let txid =
-                                Txid::from_byte_array(txid.to_byte_array());
-                            sync_state.mempool.remove(&txid);
-                            sync_state.txs_needed.remove(&txid);
-                        }
-                    }
-                    Either::Right((tx_hex, tx_info)) => {
-                        let tx: Transaction =
-                            bitcoin::consensus::encode::deserialize_hex(
-                                &tx_hex,
-                            )?;
-                        let txid = tx.compute_txid();
-                        // tx may have already been removed from mempool
-                        // FIXME
-                        /*
-                        if sync_state.txs_needed.remove(&txid) {
-                            let _: Option<_> = sync_state
-                                .mempool
-                                .insert_with_info(tx, tx_info.into());
-                        }
-                        */
-                    }
+    /// choose txs for a block proposal, mutating the underlying mempool
+    fn propose_txs_mut(&mut self) -> Result<IndexSet<Txid>, MempoolRemoveError> {
+        let mut res = IndexSet::new();
+        let mut total_size = 0;
+        loop {
+            let Some((ancestor_fee_rate, txid)) =
+                self.by_ancestor_fee_rate.iter_rev().find(|(ancestor_fee_rate, _txid)| {
+                    let total_weight = Weight::from_vb(
+                        total_size + ancestor_fee_rate.size
+                    );
+                    total_weight.is_some_and(|weight| weight < Weight::MAX_BLOCK)
+                })
+            else {
+                break;
+            };
+            let mut to_add = vec![(txid, false)];
+            while let Some((txid, parents_visited)) = to_add.pop() {
+                if parents_visited {
+                    let (_tx, _info) = self.remove(&txid)?.expect("missing tx in mempool when proposing txs");
+                    res.insert(txid);
+                } else {
+                    let (_tx, info) = &self.txs.0[&txid];
+                    to_add.extend(
+                        info.depends.iter().map(|dep| (*dep, false))
+                    );
+                    to_add.push((txid, true))
                 }
             }
+            total_size += ancestor_fee_rate.size;
         }
+        Ok(res)
     }
-    Ok(sync_state.mempool)
+
+    pub fn propose_txs(&self) -> Result<Vec<BlockTemplateTransaction>, MempoolRemoveError> {
+        let mut txs = self.clone().propose_txs_mut()?;
+        let mut res = Vec::new();
+        // build result in reverse order
+        while let Some(txid) = txs.pop() {
+            let mut depends = Vec::new();
+            let mut ancestors = self.txs.ancestors(txid);
+            while let Some((anc_txid, _, _)) = ancestors.next().transpose()? {
+                let anc_idx = txs.get_index_of(&anc_txid).expect("missing dependency in proposal txs");
+                depends.push(anc_idx as u32);
+            }
+            depends.sort();
+            let (tx, info) = &self.txs.0[&txid];
+            let block_template_tx = BlockTemplateTransaction {
+                data: bitcoin::consensus::serialize(tx),
+                txid,
+                hash: tx.compute_wtxid(),
+                depends,
+                fee: info.fees.base as i64,
+                // FIXME: compute this
+                sigops: None,
+                weight: tx.weight().to_wu()
+            };
+            res.push(block_template_tx);
+        }
+        res.reverse();
+        Ok(res)
+    }
 }

@@ -1,10 +1,16 @@
+use std::{net::SocketAddr, sync::Arc};
+
+use anyhow::Ok;
 use bip300301::MainClient as _;
+use bitcoin::{hashes::Hash, BlockHash};
 use clap::Parser;
-use tokio::time::Duration;
+use jsonrpsee::server::ServerHandle;
+use tokio::{sync::Mutex, time::Duration};
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod cli;
 mod mempool;
+mod server;
 mod zmq;
 
 // Configure logger.
@@ -22,26 +28,39 @@ fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {
     })
 }
 
+async fn spawn_rpc_server(server: server::Server, serve_rpc_addr: SocketAddr) -> anyhow::Result<ServerHandle> {
+    use server::RpcServer;
+    let handle = jsonrpsee::server::Server::builder().build(serve_rpc_addr).await?.start(server.into_rpc());
+    Ok(handle)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     set_tracing_subscriber(cli.log_level)?;
-    let rpc_client = {
+    let (rpc_client, network_info) = {
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
         let client = bip300301::client(
-            cli.rpc_addr,
-            &cli.rpc_pass,
+            cli.node_rpc_addr,
+            &cli.node_rpc_pass,
             Some(REQUEST_TIMEOUT),
-            &cli.rpc_user,
+            &cli.node_rpc_user,
         )?;
         // get network info to check that RPC client is configured correctly
-        let _network_info = client.get_network_info().await?;
+        let network_info = client.get_network_info().await?;
         tracing::debug!("connected to RPC server");
-        client
+        (client, network_info)
     };
+    let sample_block_template = rpc_client.get_block_template(Default::default()).await?;
     let mut sequence_stream =
-        zmq::subscribe_sequence(&cli.zmq_addr_sequence).await?;
-    let _mempool_txs =
-        mempool::sync_mempool(&rpc_client, &mut sequence_stream).await?;
+        zmq::subscribe_sequence(&cli.node_zmq_addr_sequence).await?;
+    let mempool = {
+        let prev_blockhash = BlockHash::from_byte_array(sample_block_template.prev_blockhash.to_byte_array());
+        mempool::sync_mempool(&rpc_client, &mut sequence_stream, prev_blockhash).await?
+    };
+    let mempool = Arc::new(Mutex::new(mempool));
+    let server = server::Server::new(mempool, network_info, sample_block_template);
+    let rpc_server_handle = spawn_rpc_server(server, cli.serve_rpc_addr).await?;
+    let () = rpc_server_handle.stopped().await;
     Ok(())
 }

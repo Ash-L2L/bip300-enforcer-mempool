@@ -151,7 +151,7 @@ pub async fn subscribe_sequence(
                     Ok(Some(sequence_msg))
                 }
                 (Some(ref mut next_mempool_seq), Some(mempool_seq)) => {
-                    match mempool_seq.cmp(&next_mempool_seq) {
+                    match mempool_seq.cmp(next_mempool_seq) {
                         Ordering::Less => Ok(None),
                         Ordering::Equal => {
                             *next_mempool_seq = mempool_seq + 1;

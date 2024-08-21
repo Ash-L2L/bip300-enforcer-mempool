@@ -1,125 +1,71 @@
-use std::{collections::{btree_map, HashSet}, ops::ControlFlow};
+use std::collections::HashSet;
 
 use bitcoin::{Transaction, Txid};
-use fallible_iterator::FallibleIterator;
-use ouroboros::self_referencing;
-use thiserror::Error;
+use lending_iterator::prelude::*;
 
-use super::{Mempool, MissingAncestorError, TxInfo};
+use super::{MempoolTxs, MissingAncestorError, TxInfo};
 
-type AncestorsItem<'a> = (&'a Transaction, &'a TxInfo);
+type AncestorsItem<'a> = (Txid, &'a Transaction, &'a TxInfo);
 
-#[self_referencing]
-#[derive(Debug)]
-struct AncestorsInner<'mempool> {
-    inner: Option<Box<AncestorsInner<'mempool>>>,
-    tx: &'mempool Transaction,
-    info: &'mempool TxInfo,
-    #[borrows(info)]
-    #[covariant]
-    depends: btree_map::Keys<'this, Txid, blake3::Hash>,
+/// Iterator over ancestors, NOT including the specified txid, where ancestors
+/// occur before descendants
+pub struct Ancestors<'mempool_txs> {
+    mempool_txs: &'mempool_txs MempoolTxs,
+    /// `bool` indicates whether all of the tx's parents have been visited
+    to_visit: Vec<(Txid, bool)>,
+    visited: HashSet<Txid>,
 }
 
-impl<'mempool> AncestorsInner<'mempool> {
-    fn next(
-        &mut self,
-        mempool: &'mempool Mempool,
-        ignore: &mut HashSet<Txid>,
-    ) -> Result<Option<AncestorsItem<'mempool>>, MissingAncestorError> {
-        if let ControlFlow::Break(res) = self.with_inner_mut(|inner_opt| {
-            if let Some(ref mut inner) = *inner_opt {
-                if let Some(res) = Self::next(inner, mempool, ignore)? {
-                    Ok(ControlFlow::Break(res))
-                } else {
-                    let inner = inner_opt.take().unwrap().into_heads();
-                    let res = (inner.tx, inner.info);
-                    Ok(ControlFlow::Break(res))
-                }
-            } else {
-                Ok(ControlFlow::Continue(()))
-            }
-        })? {
-            return Ok(Some(res));
+impl<'mempool_txs> Ancestors<'mempool_txs> {
+    fn next(&mut self) -> Result<Option<AncestorsItem<'_>>, MissingAncestorError>
+    {
+        let Some((txid, parents_visited)) = self.to_visit.pop() else {
+            return Ok(None)
         };
-        if let Some(next) =
-            self.with_depends_mut(|depends| {
-                depends.find(|dep| ignore.insert(**dep))
-            }).copied()
-        {
-            let (tx, info) = &mempool.txs.get(&next).ok_or_else(|| MissingAncestorError{
-                tx: self.with_tx(|tx| tx.compute_txid()),
-                missing: next,
+        if parents_visited {
+            // If this is the last item, ignore it
+            if self.to_visit.is_empty() {
+                return Ok(None);
+            }
+            let (tx, info) = self.mempool_txs.0.get(&txid).ok_or(MissingAncestorError {
+                tx: txid,
+                missing: txid
             })?;
-            let inner = Self::new(None, tx, info, |info| info.depends.keys());
-            self.with_inner_mut(|inner_opt| *inner_opt = Some(Box::new(inner)));
-            self.next(mempool, ignore)
+            Ok(Some((txid, tx, info)))
         } else {
-            Ok(None)
-        }
-    }
-}
-
-/// Internal state of the `Ancestors` iterator
-#[derive(Debug)]
-enum AncestorsState<'mempool> {
-    /// Newly initialized, not yet started
-    NotStarted(Txid),
-    Started {
-        ignore: HashSet<Txid>,
-        inner: AncestorsInner<'mempool>,
-    },
-    /// Completed
-    Done,
-}
-
-/// Iterator over ancestors of a tx, including the specified tx last.
-/// Descendant txs in the result occur after their ancestors.
-pub struct Ancestors<'mempool> {
-    mempool: &'mempool Mempool,
-    state: AncestorsState<'mempool>
-}
-
-impl<'mempool> FallibleIterator for Ancestors<'mempool> {
-    type Item = AncestorsItem<'mempool>;
-    type Error = MissingAncestorError;
-
-    fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        match self.state {
-            AncestorsState::NotStarted(ref txid) => {
-                let (tx, info) = &self.mempool.txs.get(txid).ok_or_else(|| MissingAncestorError {
-                    tx: *txid,
-                    missing: *txid
-                })?;
-                let inner =
-                    AncestorsInner::new(None, tx, info, |info| info.depends.keys());
-                self.state = AncestorsState::Started {
-                    ignore: HashSet::new(),
-                    inner,
-                };
-                self.next()
-            }
-            AncestorsState::Started{ ref mut ignore, ref mut inner } => {
-                match inner.next(self.mempool, ignore)? {
-                    Some(res) => Ok(Some(res)),
-                    None => {
-                        let res = inner.with(|fields| (*fields.tx, *fields.info));
-                        self.state = AncestorsState::Done;
-                        Ok(Some(res))
+            let (_, info) = self.mempool_txs.0.get(&txid).ok_or(MissingAncestorError {
+                tx: txid,
+                missing: txid
+            })?;
+            self.to_visit.push((txid, true));
+            self.to_visit.extend(
+                info.depends.iter().copied().filter_map(|dep| 
+                    if self.visited.insert(dep) {
+                        Some((dep, false))
+                    } else {
+                        None
                     }
-                }
-            }
-            AncestorsState::Done => {
-                Ok(None)
-            }
+                )
+            );
+            self.next()
         }
     }
 }
 
-impl Mempool {
-    pub fn ancestors(&self, txid: Txid) -> Ancestors {
+#[gat]
+impl<'mempool_txs> LendingIterator for Ancestors<'mempool_txs> {
+    type Item<'next>  where Self: 'next, = Result<AncestorsItem<'next>, MissingAncestorError>;
+
+    fn next<'next>(self: &'next mut Ancestors<'mempool_txs>) -> Option<Result<AncestorsItem<'next>, MissingAncestorError>> {
+        Self::next(self).transpose()
+    }
+}
+
+impl MempoolTxs {
+    /// Iterator over ancestors, NOT including the specified txid, where ancestors
+    /// occur before descendants
+    pub fn ancestors(&self, txid: Txid) -> Ancestors<'_> {
         Ancestors {
-            mempool: self,
-            state: AncestorsState::NotStarted(txid),
-        }
+            mempool_txs: self, to_visit: vec![(txid, false)], visited: HashSet::new() }
     }
 }
