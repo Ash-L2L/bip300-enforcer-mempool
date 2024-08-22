@@ -17,6 +17,7 @@ imbl = "3.0.0"
 indexmap = "2.4.0"
 jsonrpsee = { version = "0.24.3", features = ["macros", "server"] }
 lending-iterator = "0.1.7"
+parking_lot = "0.12.3"
 serde = { version = "1.0.208", features = ["derive"] }
 thiserror = "1.0.63"
 tokio = { version = "1.38.0", features = ["rt-multi-thread"] }
@@ -26,7 +27,7 @@ zeromq = "0.4.0"
 
 [dependencies.bip300301]
 git = "https://github.com/Ash-L2L/bip300301.git"
-rev = "6496809c0e2d97936fe214949d142230e0836579"
+rev = "65eae456c60281b0fdbe0d174a8eb734c844135b"
 features = ["tracing"]
 
 [lints.clippy]

@@ -1,13 +1,20 @@
-use std::collections::{btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{
+    btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet,
+};
 
 use bip300301::{
     bitcoin::hashes::Hash as _,
     client::{
-        BlockTemplateTransaction, GetRawMempoolClient as _, GetRawMempoolVerbose, GetRawTransactionClient as _, GetRawTransactionVerbose, MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose
+        BlockTemplateTransaction, GetRawMempoolClient as _,
+        GetRawTransactionClient as _, GetRawTransactionVerbose,
+        MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose,
     },
     jsonrpsee::{core::ClientError as JsonRpcError, http_client::HttpClient},
 };
-use bitcoin::{absolute::Height, hashes::Hash as _, Block, BlockHash, Target, Transaction, Txid, Weight};
+use bitcoin::{
+    absolute::Height, hashes::Hash as _, Block, BlockHash, Target, Transaction,
+    Txid, Weight,
+};
 use futures::{
     channel::mpsc,
     future::{try_join, Either},
@@ -30,7 +37,7 @@ pub use sync::sync_mempool;
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct FeeRate {
     fee: u64,
-    size: u64
+    size: u64,
 }
 
 impl Ord for FeeRate {
@@ -39,7 +46,7 @@ impl Ord for FeeRate {
         // (self.fee * other.size) > (other.fee * self.size)
         let lhs = self.fee as u128 * other.size as u128;
         let rhs = other.fee as u128 * self.size as u128;
-        lhs.cmp(&rhs) 
+        lhs.cmp(&rhs)
     }
 }
 
@@ -127,28 +134,31 @@ impl ByAncestorFeeRate {
                 }
                 true
             }
-            ordmap::Entry::Vacant(_) => {
-                false
-            }
+            ordmap::Entry::Vacant(_) => false,
         }
     }
 
     // Iterate from low-to-high fee rate, in insertion order
     fn iter(&self) -> impl DoubleEndedIterator<Item = (FeeRate, Txid)> + '_ {
-        self.0.iter().flat_map(|(fee_rate, txids)| txids.iter().map(|txid| (*fee_rate, *txid)))
+        self.0.iter().flat_map(|(fee_rate, txids)| {
+            txids.iter().map(|txid| (*fee_rate, *txid))
+        })
     }
 
     // Iterate from high-to-low fee rate, in insertion order
-    fn iter_rev(&self) -> impl DoubleEndedIterator<Item = (FeeRate, Txid)> + '_ {
-        self.0.iter().rev().flat_map(|(fee_rate, txids)| txids.iter().map(|txid| (*fee_rate, *txid)))
-
+    fn iter_rev(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (FeeRate, Txid)> + '_ {
+        self.0.iter().rev().flat_map(|(fee_rate, txids)| {
+            txids.iter().map(|txid| (*fee_rate, *txid))
+        })
     }
 }
 
 #[derive(Clone, Debug)]
 struct Chain {
     tip: BlockHash,
-    blocks: imbl::HashMap<BlockHash, bip300301::client::Block>
+    blocks: imbl::HashMap<BlockHash, bip300301::client::Block>,
 }
 
 impl Chain {
@@ -182,9 +192,15 @@ pub struct Mempool {
 
 impl Mempool {
     fn new(prev_blockhash: BlockHash) -> Self {
-        let chain = Chain { tip: prev_blockhash, blocks: imbl::HashMap::new() };
-        Self { by_ancestor_fee_rate: ByAncestorFeeRate::default(),
-            chain, txs: MempoolTxs::default() }
+        let chain = Chain {
+            tip: prev_blockhash,
+            blocks: imbl::HashMap::new(),
+        };
+        Self {
+            by_ancestor_fee_rate: ByAncestorFeeRate::default(),
+            chain,
+            txs: MempoolTxs::default(),
+        }
     }
 
     pub fn tip(&self) -> &bip300301::client::Block {
@@ -225,25 +241,32 @@ impl Mempool {
             depends,
             spent_by: _,
             bip125_replaceable,
-            unbroadcast } = info;
-        let depends = depends
-            .into_iter()
-            .collect();
+            unbroadcast,
+        } = info;
+        let depends = depends.into_iter().collect();
         for dep in &depends {
-            self.txs.0.get_mut(dep).ok_or(MissingAncestorError {
-                tx: txid,
-                missing: *dep
-            })?
-            .1.spent_by.insert(txid);
-        };
+            self.txs
+                .0
+                .get_mut(dep)
+                .ok_or(MissingAncestorError {
+                    tx: txid,
+                    missing: *dep,
+                })?
+                .1
+                .spent_by
+                .insert(txid);
+        }
         let info = TxInfo {
             ancestor_size,
             bip125_replaceable,
             depends,
             descendant_size: vsize,
-            fees: RawMempoolTxFees { descendant: fees.modified, ..fees },
+            fees: RawMempoolTxFees {
+                descendant: fees.modified,
+                ..fees
+            },
             spent_by: OrdSet::new(),
-            unbroadcast
+            unbroadcast,
         };
         let modified_fees = info.fees.modified;
         let res = self.txs.0.insert(txid, (tx, info)).map(|(_, info)| info);
@@ -277,20 +300,25 @@ impl Mempool {
         }
         let ancestor_fee_rate = FeeRate {
             fee: ancestor_fees,
-            size: ancestor_size
+            size: ancestor_size,
         };
         self.by_ancestor_fee_rate.insert(ancestor_fee_rate, txid);
         Ok(res)
     }
 
     /// Remove a tx from the mempool. Descendants are updated but not removed.
-    fn remove(&mut self, txid: &Txid) -> Result<Option<(Transaction, TxInfo)>, MempoolRemoveError> {
-        let (tx, info) = self.txs.0.get(txid).ok_or(MissingDescendantsKeyError(*txid))?;
+    fn remove(
+        &mut self,
+        txid: &Txid,
+    ) -> Result<Option<(Transaction, TxInfo)>, MempoolRemoveError> {
+        let (tx, info) = self
+            .txs
+            .0
+            .get(txid)
+            .ok_or(MissingDescendantsKeyError(*txid))?;
         let ancestor_size = info.ancestor_size;
         let vsize = tx.vsize() as u64;
-        let fees = RawMempoolTxFees {
-            ..info.fees
-        };
+        let fees = RawMempoolTxFees { ..info.fees };
         let mut descendants = self.txs.descendants_mut(*txid);
         // Skip first element
         let _: Option<_> = descendants.next().transpose()?;
@@ -301,9 +329,12 @@ impl Mempool {
                 size: desc_info.ancestor_size,
             };
             let desc_txid = desc_tx.compute_txid();
-            if !self.by_ancestor_fee_rate.remove(ancestor_fee_rate, desc_txid) {
+            if !self
+                .by_ancestor_fee_rate
+                .remove(ancestor_fee_rate, desc_txid)
+            {
                 let err = MissingByAncestorFeeRateKeyError(ancestor_fee_rate);
-                return Err(err.into())
+                return Err(err.into());
             };
             desc_info.ancestor_size -= vsize;
             desc_info.fees.ancestor -= fees.modified;
@@ -311,7 +342,8 @@ impl Mempool {
                 fee: desc_info.fees.ancestor,
                 size: desc_info.ancestor_size,
             };
-            self.by_ancestor_fee_rate.insert(ancestor_fee_rate, desc_txid);
+            self.by_ancestor_fee_rate
+                .insert(ancestor_fee_rate, desc_txid);
             desc_info.depends.remove(txid);
             Result::<_, MempoolRemoveError>::Ok(())
         })?;
@@ -325,27 +357,31 @@ impl Mempool {
         })?;
         let ancestor_fee_rate = FeeRate {
             fee: fees.ancestor,
-            size: ancestor_size
+            size: ancestor_size,
         };
         // Update `self.by_ancestor_fee_rate`
         if !self.by_ancestor_fee_rate.remove(ancestor_fee_rate, *txid) {
             let err = MissingByAncestorFeeRateKeyError(ancestor_fee_rate);
-            return Err(err.into())
+            return Err(err.into());
         };
         Ok(self.txs.0.remove(txid))
     }
 
     /// choose txs for a block proposal, mutating the underlying mempool
-    fn propose_txs_mut(&mut self) -> Result<IndexSet<Txid>, MempoolRemoveError> {
+    fn propose_txs_mut(
+        &mut self,
+    ) -> Result<IndexSet<Txid>, MempoolRemoveError> {
         let mut res = IndexSet::new();
         let mut total_size = 0;
         loop {
-            let Some((ancestor_fee_rate, txid)) =
-                self.by_ancestor_fee_rate.iter_rev().find(|(ancestor_fee_rate, _txid)| {
-                    let total_weight = Weight::from_vb(
-                        total_size + ancestor_fee_rate.size
-                    );
-                    total_weight.is_some_and(|weight| weight < Weight::MAX_BLOCK)
+            let Some((ancestor_fee_rate, txid)) = self
+                .by_ancestor_fee_rate
+                .iter_rev()
+                .find(|(ancestor_fee_rate, _txid)| {
+                    let total_weight =
+                        Weight::from_vb(total_size + ancestor_fee_rate.size);
+                    total_weight
+                        .is_some_and(|weight| weight < Weight::MAX_BLOCK)
                 })
             else {
                 break;
@@ -353,13 +389,13 @@ impl Mempool {
             let mut to_add = vec![(txid, false)];
             while let Some((txid, parents_visited)) = to_add.pop() {
                 if parents_visited {
-                    let (_tx, _info) = self.remove(&txid)?.expect("missing tx in mempool when proposing txs");
+                    let (_tx, _info) = self
+                        .remove(&txid)?
+                        .expect("missing tx in mempool when proposing txs");
                     res.insert(txid);
                 } else {
                     let (_tx, info) = &self.txs.0[&txid];
-                    to_add.extend(
-                        info.depends.iter().map(|dep| (*dep, false))
-                    );
+                    to_add.extend(info.depends.iter().map(|dep| (*dep, false)));
                     to_add.push((txid, true))
                 }
             }
@@ -368,7 +404,9 @@ impl Mempool {
         Ok(res)
     }
 
-    pub fn propose_txs(&self) -> Result<Vec<BlockTemplateTransaction>, MempoolRemoveError> {
+    pub fn propose_txs(
+        &self,
+    ) -> Result<Vec<BlockTemplateTransaction>, MempoolRemoveError> {
         let mut txs = self.clone().propose_txs_mut()?;
         let mut res = Vec::new();
         // build result in reverse order
@@ -376,7 +414,9 @@ impl Mempool {
             let mut depends = Vec::new();
             let mut ancestors = self.txs.ancestors(txid);
             while let Some((anc_txid, _, _)) = ancestors.next().transpose()? {
-                let anc_idx = txs.get_index_of(&anc_txid).expect("missing dependency in proposal txs");
+                let anc_idx = txs
+                    .get_index_of(&anc_txid)
+                    .expect("missing dependency in proposal txs");
                 depends.push(anc_idx as u32);
             }
             depends.sort();
@@ -389,7 +429,7 @@ impl Mempool {
                 fee: info.fees.base as i64,
                 // FIXME: compute this
                 sigops: None,
-                weight: tx.weight().to_wu()
+                weight: tx.weight().to_wu(),
             };
             res.push(block_template_tx);
         }

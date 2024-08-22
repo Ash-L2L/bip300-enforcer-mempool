@@ -24,5 +24,5 @@ pub struct Cli {
     pub node_zmq_addr_sequence: String,
     /// Serve `getblocktemplate` RPC from this address
     #[arg(default_value_t = DEFAULT_SERVE_RPC_ADDR, long)]
-    pub serve_rpc_addr: SocketAddr
+    pub serve_rpc_addr: SocketAddr,
 }

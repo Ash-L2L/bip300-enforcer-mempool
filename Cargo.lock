@@ -226,6 +226,7 @@ dependencies = [
  "indexmap 2.4.0",
  "jsonrpsee 0.24.3",
  "lending-iterator",
+ "parking_lot",
  "serde",
  "thiserror",
  "tokio",
@@ -237,7 +238,7 @@ dependencies = [
 [[package]]
 name = "bip300301"
 version = "0.1.1"
-source = "git+https://github.com/Ash-L2L/bip300301.git?rev=6496809c0e2d97936fe214949d142230e0836579#6496809c0e2d97936fe214949d142230e0836579"
+source = "git+https://github.com/Ash-L2L/bip300301.git?rev=65eae456c60281b0fdbe0d174a8eb734c844135b#65eae456c60281b0fdbe0d174a8eb734c844135b"
 dependencies = [
  "base64 0.21.7",
  "bitcoin",

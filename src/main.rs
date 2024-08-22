@@ -28,9 +28,15 @@ fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {
     })
 }
 
-async fn spawn_rpc_server(server: server::Server, serve_rpc_addr: SocketAddr) -> anyhow::Result<ServerHandle> {
+async fn spawn_rpc_server(
+    server: server::Server,
+    serve_rpc_addr: SocketAddr,
+) -> anyhow::Result<ServerHandle> {
     use server::RpcServer;
-    let handle = jsonrpsee::server::Server::builder().build(serve_rpc_addr).await?.start(server.into_rpc());
+    let handle = jsonrpsee::server::Server::builder()
+        .build(serve_rpc_addr)
+        .await?
+        .start(server.into_rpc());
     Ok(handle)
 }
 
@@ -51,16 +57,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::debug!("connected to RPC server");
         (client, network_info)
     };
-    let sample_block_template = rpc_client.get_block_template(Default::default()).await?;
+    let sample_block_template =
+        rpc_client.get_block_template(Default::default()).await?;
     let mut sequence_stream =
         zmq::subscribe_sequence(&cli.node_zmq_addr_sequence).await?;
     let mempool = {
-        let prev_blockhash = BlockHash::from_byte_array(sample_block_template.prev_blockhash.to_byte_array());
-        mempool::sync_mempool(&rpc_client, &mut sequence_stream, prev_blockhash).await?
+        let prev_blockhash = BlockHash::from_byte_array(
+            sample_block_template.prev_blockhash.to_byte_array(),
+        );
+        mempool::sync_mempool(&rpc_client, &mut sequence_stream, prev_blockhash)
+            .await?
     };
     let mempool = Arc::new(Mutex::new(mempool));
-    let server = server::Server::new(mempool, network_info, sample_block_template);
-    let rpc_server_handle = spawn_rpc_server(server, cli.serve_rpc_addr).await?;
+    let server =
+        server::Server::new(mempool, network_info, sample_block_template);
+    let rpc_server_handle =
+        spawn_rpc_server(server, cli.serve_rpc_addr).await?;
     let () = rpc_server_handle.stopped().await;
     Ok(())
 }
