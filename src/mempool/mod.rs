@@ -12,8 +12,8 @@ use bip300301::{
     jsonrpsee::{core::ClientError as JsonRpcError, http_client::HttpClient},
 };
 use bitcoin::{
-    absolute::Height, hashes::Hash as _, Block, BlockHash, Target, Transaction,
-    Txid, Weight,
+    absolute::Height, hashes::Hash as _, Amount, Block, BlockHash, Target,
+    Transaction, Txid, Weight,
 };
 use futures::{
     channel::mpsc,
@@ -70,7 +70,6 @@ pub struct TxInfo {
     pub descendant_size: u64,
     pub fees: RawMempoolTxFees,
     pub spent_by: OrdSet<Txid>,
-    pub unbroadcast: bool,
 }
 
 #[derive(Debug, Error)]
@@ -95,6 +94,8 @@ pub struct MissingDescendantsKeyError(Txid);
 pub enum MempoolInsertError {
     #[error(transparent)]
     MissingAncestor(#[from] MissingAncestorError),
+    #[error(transparent)]
+    MissingDescendant(#[from] MissingDescendantError),
     #[error(transparent)]
     MissingDescendantsKey(#[from] MissingDescendantsKeyError),
 }
@@ -179,6 +180,30 @@ impl Chain {
     }
 }
 
+/// Map of txs (which may not be in the mempool) to their direct child txs,
+/// which MUST be in the mempool
+#[derive(Clone, Debug, Default)]
+struct TxChilds(imbl::HashMap<Txid, imbl::HashSet<Txid>>);
+
+impl TxChilds {
+    fn insert(&mut self, txid: Txid, child: Txid) -> bool {
+        self.0.entry(txid).or_default().insert(child).is_some()
+    }
+
+    fn remove(&mut self, txid: Txid, child: Txid) -> bool {
+        match self.0.entry(txid) {
+            imbl::hashmap::Entry::Occupied(mut entry) => {
+                let res = entry.get_mut().remove(&child).is_some();
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+                res
+            }
+            imbl::hashmap::Entry::Vacant(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct MempoolTxs(imbl::HashMap<Txid, (Transaction, TxInfo)>);
 
@@ -187,6 +212,9 @@ struct MempoolTxs(imbl::HashMap<Txid, (Transaction, TxInfo)>);
 pub struct Mempool {
     by_ancestor_fee_rate: ByAncestorFeeRate,
     chain: Chain,
+    /// Map of txs (which may not be in the mempool) to their direct child txs,
+    /// which MUST be in the mempool
+    tx_childs: TxChilds,
     txs: MempoolTxs,
 }
 
@@ -199,6 +227,7 @@ impl Mempool {
         Self {
             by_ancestor_fee_rate: ByAncestorFeeRate::default(),
             chain,
+            tx_childs: TxChilds::default(),
             txs: MempoolTxs::default(),
         }
     }
@@ -207,17 +236,89 @@ impl Mempool {
         &self.chain.blocks[&self.chain.tip]
     }
 
-    pub fn tip_hash(&self) -> BlockHash {
-        self.chain.tip
-    }
-
-    pub fn tip_height(&self) -> u64 {
-        self.chain.blocks[&self.chain.tip].height as u64
-    }
-
     pub fn next_target(&self) -> Target {
         // FIXME: calculate this properly
         self.chain.blocks[&self.chain.tip].compact_target.into()
+    }
+
+    /// Insert a tx into the mempool
+    fn insert(
+        &mut self,
+        tx: Transaction,
+        fee: u64,
+    ) -> Result<Option<TxInfo>, MempoolInsertError> {
+        let txid = tx.compute_txid();
+        // initially incorrect, must be computed after insertion
+        let mut ancestor_fees = fee;
+        // initially incorrect, must be computed after insertion
+        let mut descendant_fees = fee;
+        let modified_fee = fee;
+        let vsize = tx.vsize() as u64;
+        // initially incorrect, must be computed after insertion
+        let mut ancestor_size = vsize;
+        // initially incorrect, must be computed after insertion
+        let mut descendant_size = vsize;
+        let depends = tx
+            .input
+            .iter()
+            .map(|input| {
+                let input_txid = input.previous_output.txid;
+                self.tx_childs.insert(input_txid, txid);
+                input_txid
+            })
+            .filter(|input_txid| self.txs.0.contains_key(input_txid))
+            .collect();
+        let spent_by = if let Some(childs) = self.tx_childs.0.get(&txid) {
+            OrdSet::from_iter(childs.iter().copied())
+        } else {
+            OrdSet::new()
+        };
+        let info = TxInfo {
+            ancestor_size,
+            bip125_replaceable: tx.is_explicitly_rbf(),
+            depends,
+            descendant_size,
+            fees: RawMempoolTxFees {
+                ancestor: ancestor_fees,
+                base: fee,
+                descendant: descendant_fees,
+                modified: modified_fee,
+            },
+            spent_by,
+        };
+        let (ndeps, nspenders) = (info.depends.len(), info.spent_by.len());
+        let res = self.txs.0.insert(txid, (tx, info)).map(|(_, info)| info);
+        // FIXME: remove
+        tracing::debug!("Inserted {txid} to mempool with {ndeps} deps and {nspenders} spenders");
+        self.txs.ancestors_mut(txid).try_for_each(|ancestor_info| {
+            let (ancestor_tx, ancestor_info) = ancestor_info?;
+            ancestor_size += ancestor_tx.vsize() as u64;
+            ancestor_fees += ancestor_info.fees.modified;
+            ancestor_info.descendant_size += vsize;
+            ancestor_info.fees.descendant += modified_fee;
+            Result::<_, MempoolInsertError>::Ok(())
+        })?;
+        self.txs.descendants_mut(txid).skip(1).try_for_each(
+            |descendant_info| {
+                let (descendant_tx, descendant_info) = descendant_info?;
+                descendant_size += descendant_tx.vsize() as u64;
+                descendant_fees += descendant_info.fees.modified;
+                descendant_info.ancestor_size += vsize;
+                descendant_info.fees.ancestor += modified_fee;
+                Result::<_, MempoolInsertError>::Ok(())
+            },
+        )?;
+        let (_, info) = self.txs.0.get_mut(&txid).unwrap();
+        info.fees.ancestor = ancestor_fees;
+        info.fees.descendant = descendant_fees;
+        info.ancestor_size = ancestor_size;
+        info.descendant_size = descendant_size;
+        let ancestor_fee_rate = FeeRate {
+            fee: ancestor_fees,
+            size: ancestor_size,
+        };
+        self.by_ancestor_fee_rate.insert(ancestor_fee_rate, txid);
+        Ok(res)
     }
 
     /// Insert with info already computed. For use during initial sync only.
@@ -241,7 +342,7 @@ impl Mempool {
             depends,
             spent_by: _,
             bip125_replaceable,
-            unbroadcast,
+            unbroadcast: _,
         } = info;
         let depends = depends.into_iter().collect();
         for dep in &depends {
@@ -266,7 +367,6 @@ impl Mempool {
                 ..fees
             },
             spent_by: OrdSet::new(),
-            unbroadcast,
         };
         let modified_fees = info.fees.modified;
         let res = self.txs.0.insert(txid, (tx, info)).map(|(_, info)| info);
@@ -311,14 +411,16 @@ impl Mempool {
         &mut self,
         txid: &Txid,
     ) -> Result<Option<(Transaction, TxInfo)>, MempoolRemoveError> {
-        let (tx, info) = self
-            .txs
-            .0
-            .get(txid)
-            .ok_or(MissingDescendantsKeyError(*txid))?;
+        let Some((tx, info)) = self.txs.0.get(txid) else {
+            return Ok(None);
+        };
         let ancestor_size = info.ancestor_size;
         let vsize = tx.vsize() as u64;
         let fees = RawMempoolTxFees { ..info.fees };
+        for spent_tx in tx.input.iter().map(|input| input.previous_output.txid)
+        {
+            self.tx_childs.remove(spent_tx, *txid);
+        }
         let mut descendants = self.txs.descendants_mut(*txid);
         // Skip first element
         let _: Option<_> = descendants.next().transpose()?;
@@ -344,14 +446,19 @@ impl Mempool {
             };
             self.by_ancestor_fee_rate
                 .insert(ancestor_fee_rate, desc_txid);
+            // FIXME: remove
+            tracing::debug!("removing {txid} as a dep of {desc_txid}");
             desc_info.depends.remove(txid);
             Result::<_, MempoolRemoveError>::Ok(())
         })?;
         // Update all ancestors
         let () = self.txs.ancestors_mut(*txid).try_for_each(|anc| {
-            let (_anc_tx, anc_info) = anc?;
+            let (anc_tx, anc_info) = anc?;
             anc_info.descendant_size -= vsize;
             anc_info.fees.descendant -= fees.modified;
+            let anc_txid = anc_tx.compute_txid();
+            // FIXME: remove
+            tracing::debug!("removing {txid} as a spender of {anc_txid}");
             anc_info.spent_by.remove(txid);
             Result::<_, MempoolRemoveError>::Ok(())
         })?;
@@ -364,7 +471,10 @@ impl Mempool {
             let err = MissingByAncestorFeeRateKeyError(ancestor_fee_rate);
             return Err(err.into());
         };
-        Ok(self.txs.0.remove(txid))
+        let res = self.txs.0.remove(txid);
+        // FIXME: remove
+        tracing::debug!("Removed {txid} from mempool");
+        Ok(res)
     }
 
     /// choose txs for a block proposal, mutating the underlying mempool

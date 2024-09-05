@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         mempool::sync_mempool(&rpc_client, &mut sequence_stream, prev_blockhash)
             .await?
     };
+    tracing::info!("Initial mempool sync complete");
     let mempool = Arc::new(Mutex::new(mempool));
     let server =
         server::Server::new(mempool, network_info, sample_block_template);

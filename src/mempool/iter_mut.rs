@@ -28,19 +28,25 @@ impl<'mempool_txs> AncestorsMut<'mempool_txs> {
             if self.to_visit.is_empty() {
                 return Ok(None);
             }
-            let (tx, info) = self.mempool_txs.0.get_mut(&txid).ok_or(
+            let (tx, info) =
+                self.mempool_txs.0.get_mut(&txid).ok_or_else(|| {
+                    // FIXME: remove
+                    tracing::error!("MAE next 0");
+                    MissingAncestorError {
+                        tx: txid,
+                        missing: txid,
+                    }
+                })?;
+            Ok(Some((tx, info)))
+        } else {
+            let (_, info) = self.mempool_txs.0.get(&txid).ok_or_else(|| {
+                // FIXME: remove
+                tracing::error!("MAE next 1");
                 MissingAncestorError {
                     tx: txid,
                     missing: txid,
-                },
-            )?;
-            Ok(Some((tx, info)))
-        } else {
-            let (_, info) =
-                self.mempool_txs.0.get(&txid).ok_or(MissingAncestorError {
-                    tx: txid,
-                    missing: txid,
-                })?;
+                }
+            })?;
             self.to_visit.push((txid, true));
             self.to_visit
                 .extend(info.depends.iter().copied().filter_map(|dep| {

@@ -73,13 +73,13 @@ impl RpcServer for Server {
             ..
         } = self.sample_block_template;
         let mempool_locked = self.mempool.lock().await;
-        let prev_blockhash = mempool_locked.tip_hash();
         let target = mempool_locked.next_target();
         let transactions = mempool_locked.propose_txs().map_err(|err| {
             log_error(err);
             jsonrpsee::types::ErrorObject::from(ErrorCode::InternalError)
         })?;
         let tip_block = mempool_locked.tip();
+        let prev_blockhash = tip_block.hash;
         let current_time_adjusted =
             (now.timestamp() + self.network_info.time_offset_s) as u64;
         let mintime = std::cmp::max(
