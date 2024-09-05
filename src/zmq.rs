@@ -157,9 +157,9 @@ impl<'a> Stream for SequenceStream<'a> {
 }
 
 #[tracing::instrument]
-pub async fn subscribe_sequence(
+pub async fn subscribe_sequence<'a>(
     zmq_addr_rawblock: &str,
-) -> Result<SequenceStream, ZmqError> {
+) -> Result<SequenceStream<'a>, ZmqError> {
     tracing::debug!("Attempting to connect to ZMQ server...");
     let mut socket = zeromq::SubSocket::new();
     socket.connect(zmq_addr_rawblock).await?;

@@ -1,16 +1,9 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use bip300301::{
-    bitcoin::hashes::Hash as _,
-    client::{BlockTemplate, BlockTemplateRequest, NetworkInfo},
-};
-use bitcoin::hashes::Hash as _;
+use bip300301::client::{BlockTemplate, BlockTemplateRequest, NetworkInfo};
 use chrono::Utc;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorCode};
-use tokio::sync::Mutex;
 
-use crate::mempool::Mempool;
+use crate::mempool::{MempoolRemoveError, MempoolSync};
 
 #[rpc(server)]
 pub trait Rpc {
@@ -22,14 +15,14 @@ pub trait Rpc {
 }
 
 pub struct Server {
-    mempool: Arc<Mutex<Mempool>>,
+    mempool: MempoolSync,
     network_info: NetworkInfo,
     sample_block_template: BlockTemplate,
 }
 
 impl Server {
     pub fn new(
-        mempool: Arc<Mutex<Mempool>>,
+        mempool: MempoolSync,
         network_info: NetworkInfo,
         sample_block_template: BlockTemplate,
     ) -> Self {
@@ -72,21 +65,36 @@ impl RpcServer for Server {
             weight_limit,
             ..
         } = self.sample_block_template;
-        let mempool_locked = self.mempool.lock().await;
-        let target = mempool_locked.next_target();
-        let transactions = mempool_locked.propose_txs().map_err(|err| {
-            log_error(err);
-            jsonrpsee::types::ErrorObject::from(ErrorCode::InternalError)
-        })?;
-        let tip_block = mempool_locked.tip();
-        let prev_blockhash = tip_block.hash;
+        let (
+            target,
+            prev_blockhash,
+            tip_block_mediantime,
+            tip_block_height,
+            transactions,
+        ) = self
+            .mempool
+            .with_mempool(|mempool| {
+                let tip_block = mempool.tip();
+                Ok((
+                    mempool.next_target(),
+                    tip_block.hash,
+                    tip_block.mediantime,
+                    tip_block.height,
+                    mempool.propose_txs()?,
+                ))
+            })
+            .await
+            .map_err(|err: MempoolRemoveError| {
+                log_error(err);
+                jsonrpsee::types::ErrorObject::from(ErrorCode::InternalError)
+            })?;
         let current_time_adjusted =
             (now.timestamp() + self.network_info.time_offset_s) as u64;
         let mintime = std::cmp::max(
-            tip_block.mediantime as u64 + 1,
+            tip_block_mediantime as u64 + 1,
             current_time_adjusted,
         );
-        let height = tip_block.height as u32 + 1;
+        let height = tip_block_height as u32 + 1;
         let res = BlockTemplate {
             version,
             rules: rules.clone(),

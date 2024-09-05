@@ -1,41 +1,21 @@
 //! Initial mempool sync
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::collections::{HashMap, VecDeque};
 
 use bip300301::{
     bitcoin::hashes::Hash as _,
-    client::{
-        BlockTemplateTransaction, BoolWitness, GetRawMempoolClient as _,
-        GetRawTransactionClient as _, GetRawTransactionVerbose,
-        MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose,
-        RawMempoolWithSequence,
-    },
-    jsonrpsee::{
-        core::{
-            client::ClientT as _,
-            params::{ArrayParams, BatchRequestBuilder},
-            ClientError as JsonRpcError,
-        },
-        http_client::HttpClient,
-    },
+    client::{BoolWitness, GetRawMempoolClient as _, RawMempoolWithSequence},
+    jsonrpsee::{core::ClientError as JsonRpcError, http_client::HttpClient},
 };
 use bitcoin::{Amount, BlockHash, OutPoint, Transaction, Txid};
-use futures::{
-    channel::mpsc,
-    future::{try_join, Either},
-    stream, StreamExt as _,
-};
-use hashlink::{LinkedHashMap, LinkedHashSet};
-use parking_lot::Mutex;
+use futures::{stream, StreamExt as _};
+use hashlink::LinkedHashSet;
 use thiserror::Error;
 
 use super::{
     super::{Mempool, MempoolInsertError, MempoolRemoveError},
-    batched_request, BatchedRequestItem, BatchedResponseItem,
-    CombinedStreamItem, RequestError, RequestItem, RequestQueue, ResponseItem,
+    batched_request, BatchedResponseItem, CombinedStreamItem, RequestError,
+    RequestItem, RequestQueue, ResponseItem,
 };
 use crate::zmq::{SequenceMessage, SequenceStream, SequenceStreamError};
 

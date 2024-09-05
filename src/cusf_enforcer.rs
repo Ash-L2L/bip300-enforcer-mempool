@@ -1,5 +1,6 @@
 use bitcoin::Transaction;
 use either::Either;
+use thiserror::Error;
 
 pub trait CusfEnforcer {
     type AcceptTxError: std::error::Error;
@@ -31,5 +32,23 @@ where
         } else {
             Ok(false)
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+
+pub struct DefaultEnforcer;
+
+#[derive(Clone, Copy, Debug, Error)]
+pub enum NeverError {}
+
+impl CusfEnforcer for DefaultEnforcer {
+    type AcceptTxError = NeverError;
+
+    fn accept_tx(
+        &mut self,
+        _tx: &Transaction,
+    ) -> Result<bool, Self::AcceptTxError> {
+        Ok(true)
     }
 }

@@ -31,6 +31,7 @@ mod initial_sync;
 mod sync;
 
 pub use initial_sync::init_sync_mempool;
+pub use sync::MempoolSync;
 
 /// Items requested while syncing
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -139,7 +140,7 @@ enum BatchedResponseItem {
 }
 
 #[derive(Debug, Error)]
-enum RequestError {
+pub enum RequestError {
     #[error("Error deserializing tx")]
     DeserializeTx(#[from] bitcoin::consensus::encode::FromHexError),
     #[error("RPC error")]

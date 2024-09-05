@@ -4,7 +4,9 @@ use anyhow::Ok;
 use bip300301::MainClient as _;
 use bitcoin::{hashes::Hash, BlockHash};
 use clap::Parser;
+use cusf_enforcer::DefaultEnforcer;
 use jsonrpsee::server::ServerHandle;
+use mempool::MempoolSync;
 use tokio::{sync::Mutex, time::Duration};
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
@@ -74,7 +76,12 @@ async fn main() -> anyhow::Result<()> {
         .await?
     };
     tracing::info!("Initial mempool sync complete");
-    let mempool = Arc::new(Mutex::new(mempool));
+    let mempool = MempoolSync::new(
+        DefaultEnforcer,
+        mempool,
+        &rpc_client,
+        sequence_stream,
+    );
     let server =
         server::Server::new(mempool, network_info, sample_block_template);
     let rpc_server_handle =
