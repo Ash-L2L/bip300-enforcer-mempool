@@ -9,6 +9,7 @@ use tokio::{sync::Mutex, time::Duration};
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod cli;
+mod cusf_enforcer;
 mod mempool;
 mod server;
 mod zmq;
@@ -65,8 +66,12 @@ async fn main() -> anyhow::Result<()> {
         let prev_blockhash = BlockHash::from_byte_array(
             sample_block_template.prev_blockhash.to_byte_array(),
         );
-        mempool::sync_mempool(&rpc_client, &mut sequence_stream, prev_blockhash)
-            .await?
+        mempool::init_sync_mempool(
+            &rpc_client,
+            &mut sequence_stream,
+            prev_blockhash,
+        )
+        .await?
     };
     tracing::info!("Initial mempool sync complete");
     let mempool = Arc::new(Mutex::new(mempool));

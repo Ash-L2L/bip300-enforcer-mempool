@@ -32,20 +32,12 @@ use hashlink::{LinkedHashMap, LinkedHashSet};
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use super::{Mempool, MempoolInsertError, MempoolRemoveError};
+use super::{
+    super::{Mempool, MempoolInsertError, MempoolRemoveError},
+    batched_request, BatchedRequestItem, BatchedResponseItem,
+    CombinedStreamItem, RequestError, RequestItem, RequestQueue, ResponseItem,
+};
 use crate::zmq::{SequenceMessage, SequenceStream, SequenceStreamError};
-
-/// Items requested while syncing
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum RequestItem {
-    /// Bool indicating if the tx is a mempool tx.
-    /// `false` if the tx is needed as a dependency for a mempool tx
-    BatchTx(Vec<(Txid, bool)>),
-    Block(BlockHash),
-    /// Bool indicating if the tx is a mempool tx.
-    /// `false` if the tx is needed as a dependency for a mempool tx
-    Tx(Txid, bool),
-}
 
 #[derive(Debug)]
 struct MempoolSyncing {
@@ -55,7 +47,7 @@ struct MempoolSyncing {
     /// Return an error if higher sequence is encountered.
     first_mempool_sequence: Option<u64>,
     mempool: Mempool,
-    request_queue: Arc<Mutex<LinkedHashSet<RequestItem>>>,
+    request_queue: RequestQueue,
     seq_message_queue: VecDeque<SequenceMessage>,
     /// Txs not needed in mempool, but requested in order to determine fees
     tx_cache: HashMap<Txid, Transaction>,
@@ -74,8 +66,6 @@ impl MempoolSyncing {
 pub enum SyncMempoolError {
     #[error("Combined stream ended unexpectedly")]
     CombinedStreamEnded,
-    #[error("Error deserializing tx")]
-    DeserializeTx(#[from] bitcoin::consensus::encode::FromHexError),
     #[error("Fee overflow")]
     FeeOverflow,
     #[error("Missing first message with mempool sequence: {0}")]
@@ -86,6 +76,8 @@ pub enum SyncMempoolError {
     MempoolInsert(#[from] MempoolInsertError),
     #[error(transparent)]
     MempoolRemove(#[from] MempoolRemoveError),
+    #[error("Request error")]
+    Request(#[from] RequestError),
     #[error("Sequence stream error")]
     SequenceStream(#[from] SequenceStreamError),
     #[error("Sequence stream ended unexpectedly")]
@@ -103,8 +95,7 @@ fn handle_seq_message(
             sync_state.blocks_needed.replace(block_hash);
             sync_state
                 .request_queue
-                .lock()
-                .replace(RequestItem::Block(block_hash));
+                .push_back(RequestItem::Block(block_hash));
         }
         SequenceMessage::BlockHashDisconnected(block_hash, _) => {
             // FIXME: remove
@@ -113,8 +104,7 @@ fn handle_seq_message(
                 sync_state.blocks_needed.replace(block_hash);
                 sync_state
                     .request_queue
-                    .lock()
-                    .replace(RequestItem::Block(block_hash));
+                    .push_back(RequestItem::Block(block_hash));
             }
         }
         SequenceMessage::TxHashAdded {
@@ -139,8 +129,7 @@ fn handle_seq_message(
             sync_state.txs_needed.replace(txid);
             sync_state
                 .request_queue
-                .lock()
-                .replace(RequestItem::Tx(txid, true));
+                .push_back(RequestItem::Tx(txid, true));
         }
         SequenceMessage::TxHashRemoved {
             txid,
@@ -165,23 +154,11 @@ fn handle_seq_message(
             sync_state.txs_needed.remove(&txid);
             sync_state
                 .request_queue
-                .lock()
                 .remove(&RequestItem::Tx(txid, true));
         }
     }
     sync_state.seq_message_queue.push_back(seq_msg);
     Ok(())
-}
-
-#[derive(Debug)]
-enum ResponseItem {
-    /// Bool indicating if the tx is a mempool tx.
-    /// `false` if the tx is needed as a dependency for a mempool tx
-    BatchTx(Vec<(Transaction, bool)>),
-    Block(bip300301::client::Block),
-    /// Bool indicating if the tx is a mempool tx.
-    /// `false` if the tx is needed as a dependency for a mempool tx
-    Tx(Transaction, bool),
 }
 
 fn handle_resp_block(
@@ -193,13 +170,13 @@ fn handle_resp_block(
         Some(SequenceMessage::BlockHashConnected(block_hash, _))
             if *block_hash == block.hash =>
         {
-            let mut request_queue_lock = sync_state.request_queue.lock();
             for txid in &block.tx {
                 let _removed: Option<_> = sync_state.mempool.remove(txid)?;
                 sync_state.txs_needed.remove(txid);
-                request_queue_lock.remove(&RequestItem::Tx(*txid, true));
+                sync_state
+                    .request_queue
+                    .remove(&RequestItem::Tx(*txid, true));
             }
-            drop(request_queue_lock);
             sync_state.mempool.chain.tip = block.hash;
             sync_state.seq_message_queue.pop_front();
         }
@@ -259,25 +236,12 @@ fn try_add_tx_from_cache(
         let value = input_tx.output[vout as usize].value;
         value_in = value_in.map(|value_in| value_in + value);
     }
-    for input_txid in input_txs_needed.iter().rev() {
-        sync_state.txs_needed.replace(*input_txid);
-        sync_state.txs_needed.to_front(input_txid);
-    }
-    let request = match input_txs_needed.len() {
-        0 => None,
-        1 => Some(RequestItem::Tx(input_txs_needed[0], false)),
-        (2..) => Some(RequestItem::BatchTx(
-            input_txs_needed
-                .into_iter()
-                .map(|input_txid| (input_txid, false))
-                .collect(),
-        )),
-    };
-    if let Some(request) = request {
-        let mut request_queue_lock = sync_state.request_queue.lock();
-        request_queue_lock.replace(request.clone());
-        request_queue_lock.to_front(&request);
-        drop(request_queue_lock);
+    for input_txid in input_txs_needed.into_iter().rev() {
+        sync_state.txs_needed.replace(input_txid);
+        sync_state.txs_needed.to_front(&input_txid);
+        sync_state
+            .request_queue
+            .push_front(RequestItem::Tx(input_txid, false))
     }
     let Some(value_in) = value_in else {
         return Ok(false);
@@ -340,10 +304,10 @@ fn try_apply_next_seq_message(
 
 fn handle_resp(
     sync_state: &mut MempoolSyncing,
-    resp: ResponseItem,
+    resp: BatchedResponseItem,
 ) -> Result<(), SyncMempoolError> {
     match resp {
-        ResponseItem::BatchTx(txs) => {
+        BatchedResponseItem::BatchTx(txs) => {
             let mut input_txs_needed = LinkedHashSet::new();
             for (tx, in_mempool) in txs {
                 if in_mempool {
@@ -360,32 +324,18 @@ fn handle_resp(
             sync_state
                 .txs_needed
                 .extend(input_txs_needed.iter().copied());
-            let request = match input_txs_needed.len() {
-                0 => None,
-                1 => Some(RequestItem::Tx(
-                    input_txs_needed.pop_front().unwrap(),
-                    false,
-                )),
-                2.. => Some(RequestItem::BatchTx(
-                    input_txs_needed
-                        .into_iter()
-                        .map(|input_txid| (input_txid, false))
-                        .collect(),
-                )),
-            };
-            if let Some(request) = request {
-                let mut request_queue_lock = sync_state.request_queue.lock();
-                request_queue_lock.replace(request.clone());
-                request_queue_lock.to_front(&request);
-                drop(request_queue_lock);
+            for input_txid in input_txs_needed.into_iter().rev() {
+                sync_state
+                    .request_queue
+                    .push_front(RequestItem::Tx(input_txid, false))
             }
         }
-        ResponseItem::Block(block) => {
+        BatchedResponseItem::Single(ResponseItem::Block(block)) => {
             // FIXME: remove
             tracing::debug!("Handling block {}", block.hash);
             let () = handle_resp_block(sync_state, block)?;
         }
-        ResponseItem::Tx(tx, in_mempool) => {
+        BatchedResponseItem::Single(ResponseItem::Tx(tx, in_mempool)) => {
             let mut input_txs_needed = LinkedHashSet::new();
             if in_mempool {
                 for input_txid in
@@ -400,24 +350,10 @@ fn handle_resp(
             sync_state
                 .txs_needed
                 .extend(input_txs_needed.iter().copied());
-            let request = match input_txs_needed.len() {
-                0 => None,
-                1 => Some(RequestItem::Tx(
-                    input_txs_needed.pop_front().unwrap(),
-                    false,
-                )),
-                2.. => Some(RequestItem::BatchTx(
-                    input_txs_needed
-                        .into_iter()
-                        .map(|input_txid| (input_txid, false))
-                        .collect(),
-                )),
-            };
-            if let Some(request) = request {
-                let mut request_queue_lock = sync_state.request_queue.lock();
-                request_queue_lock.replace(request.clone());
-                request_queue_lock.to_front(&request);
-                drop(request_queue_lock);
+            for input_txid in input_txs_needed.into_iter().rev() {
+                sync_state
+                    .request_queue
+                    .push_front(RequestItem::Tx(input_txid, false))
             }
         }
     }
@@ -425,14 +361,7 @@ fn handle_resp(
     Ok(())
 }
 
-/// Items processed while syncing
-#[derive(Debug)]
-enum CombinedStreamItem {
-    ZmqSeq(Result<SequenceMessage, SequenceStreamError>),
-    Response(Result<ResponseItem, SyncMempoolError>),
-}
-
-pub async fn sync_mempool(
+pub async fn init_sync_mempool(
     rpc_client: &HttpClient,
     sequence_stream: &mut SequenceStream<'_>,
     prev_blockhash: BlockHash,
@@ -444,12 +373,11 @@ pub async fn sync_mempool(
         .get_raw_mempool(BoolWitness::<false>, BoolWitness::<true>)
         .await?;
     let mut sync_state = {
-        let request_queue = LinkedHashSet::from_iter([
-            RequestItem::Block(prev_blockhash),
-            RequestItem::BatchTx(
-                txids.iter().map(|txid| (*txid, true)).collect(),
-            ),
-        ]);
+        let request_queue = RequestQueue::default();
+        request_queue.push_back(RequestItem::Block(prev_blockhash));
+        for txid in &txids {
+            request_queue.push_back(RequestItem::Tx(*txid, true));
+        }
         let seq_message_queue = VecDeque::from_iter(txids.iter().map(|txid| {
             SequenceMessage::TxHashAdded {
                 txid: *txid,
@@ -461,112 +389,22 @@ pub async fn sync_mempool(
             blocks_needed: LinkedHashSet::from_iter([prev_blockhash]),
             first_mempool_sequence: Some(mempool_sequence + 1),
             mempool: Mempool::new(prev_blockhash),
-            request_queue: Arc::new(Mutex::new(request_queue)),
+            request_queue,
             seq_message_queue,
             tx_cache: HashMap::new(),
             txs_needed: LinkedHashSet::from_iter(txids),
         }
     };
 
-    let request_stream = stream::try_unfold((), {
-        let request_queue = sync_state.request_queue.clone();
-        move |()| {
-            let mut request_queue_lock = request_queue.lock();
-            let requests_remaining = request_queue_lock.len();
-            let mut next_req = request_queue_lock.pop_front();
-            if let Some(RequestItem::Tx(txid, in_mempool)) = next_req {
-                let mut txids = vec![(txid, in_mempool)];
-                loop {
-                    match request_queue_lock.front() {
-                        Some(RequestItem::Tx(txid, in_mempool)) => {
-                            txids.push((*txid, *in_mempool));
-                            request_queue_lock.pop_front();
-                        }
-                        Some(RequestItem::BatchTx(batch_txids)) => {
-                            txids.extend(batch_txids);
-                            request_queue_lock.pop_front();
-                        }
-                        Some(RequestItem::Block(_)) | None => {
-                            break;
-                        }
-                    }
-                }
-                if txids.len() > 1 {
-                    next_req = Some(RequestItem::BatchTx(txids));
-                }
-            }
-            drop(request_queue_lock);
-            tracing::debug!(%requests_remaining, "Syncing...");
-            async move {
-                let Some(next_req) = next_req else {
-                    tracing::debug!("Request stream done");
-                    return Result::<_, SyncMempoolError>::Ok(None);
-                };
-                match next_req {
-                    RequestItem::BatchTx(txs) => {
-                        let in_mempool =
-                            HashMap::<_, _>::from_iter(txs.iter().copied());
-                        let mut request = BatchRequestBuilder::new();
-                        for (txid, _) in txs {
-                            let mut params = ArrayParams::new();
-                            params.insert(txid).unwrap();
-                            params.insert(false).unwrap();
-                            request
-                                .insert("getrawtransaction", params)
-                                .unwrap();
-                        }
-                        let txs: Vec<(Transaction, bool)> = rpc_client
-                            .batch_request(request)
-                            .await?
-                            .into_ok()
-                            .map_err(|mut errs| {
-                                JsonRpcError::from(errs.next().unwrap())
-                            })?
-                            .map(|tx_hex: String| {
-                                bitcoin::consensus::encode::deserialize_hex(
-                                    &tx_hex,
-                                )
-                                .map(
-                                    |tx: Transaction| {
-                                        let txid = tx.compute_txid();
-                                        (tx, in_mempool[&txid])
-                                    },
-                                )
-                            })
-                            .collect::<Result<_, _>>()?;
-                        let item = ResponseItem::BatchTx(txs);
-                        Ok(Some((item, ())))
-                    }
-                    RequestItem::Block(block_hash) => {
-                        let block =
-                            rpc_client.getblock(block_hash, Some(1)).await?;
-                        let item = ResponseItem::Block(block);
-                        Ok(Some((item, ())))
-                    }
-                    RequestItem::Tx(txid, in_mempool) => {
-                        let tx_hex = rpc_client
-                            .get_raw_transaction(
-                                txid,
-                                GetRawTransactionVerbose::<false>,
-                                None,
-                            )
-                            .await?;
-                        let tx: Transaction =
-                            bitcoin::consensus::encode::deserialize_hex(
-                                &tx_hex,
-                            )?;
-                        let item = ResponseItem::Tx(tx, in_mempool);
-                        Ok(Some((item, ())))
-                    }
-                }
-            }
-        }
-    })
-    .boxed();
+    let response_stream = sync_state
+        .request_queue
+        .clone()
+        .then(|request| batched_request(rpc_client, request))
+        .boxed();
 
     let mut combined_stream = stream::select(
         sequence_stream.map(CombinedStreamItem::ZmqSeq),
-        request_stream.map(CombinedStreamItem::Response),
+        response_stream.map(CombinedStreamItem::Response),
     );
     while !sync_state.is_synced() {
         // FIXME: remove

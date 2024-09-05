@@ -32,7 +32,7 @@ pub mod iter;
 pub mod iter_mut;
 mod sync;
 
-pub use sync::sync_mempool;
+pub use sync::init_sync_mempool;
 
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct FeeRate {
