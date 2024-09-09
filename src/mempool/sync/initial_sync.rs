@@ -272,7 +272,10 @@ fn try_apply_next_seq_message(
                 txid,
                 mempool_seq: _,
                 zmq_seq: _,
-            }) => sync_state.mempool.remove(txid)?.is_some(),
+            }) => {
+                // FIXME: review -- looks sus
+                sync_state.mempool.remove(txid)?.is_some()
+            }
             Some(SequenceMessage::BlockHashConnected(_, _)) | None => false,
         }
     };

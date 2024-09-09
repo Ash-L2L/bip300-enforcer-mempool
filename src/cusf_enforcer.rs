@@ -3,7 +3,7 @@ use either::Either;
 use thiserror::Error;
 
 pub trait CusfEnforcer {
-    type AcceptTxError: std::error::Error;
+    type AcceptTxError: std::error::Error + Send + Sync + 'static;
 
     /// Return `true` to accept the tx, or `false` to reject it
     fn accept_tx(
