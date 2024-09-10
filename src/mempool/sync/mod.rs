@@ -17,7 +17,7 @@ use bip300301::{
         http_client::HttpClient,
     },
 };
-use bitcoin::{BlockHash, Transaction, Txid};
+use bitcoin::{Amount, BlockHash, Transaction, Txid};
 
 use futures::Stream;
 use hashlink::LinkedHashSet;
@@ -37,6 +37,8 @@ pub use sync::MempoolSync;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum RequestItem {
     Block(BlockHash),
+    /// Reject a tx
+    RejectTx(Txid),
     /// Bool indicating if the tx is a mempool tx.
     /// `false` if the tx is needed as a dependency for a mempool tx
     Tx(Txid, bool),
@@ -98,9 +100,9 @@ impl Stream for RequestQueue {
         let mut queue_lock = self.inner.queue.lock();
         *self.inner.waker.lock() = Some(cx.waker().clone());
         let mut txids = match queue_lock.pop_front() {
-            Some(request @ RequestItem::Block(_)) => {
-                return Poll::Ready(Some(BatchedRequestItem::Single(request)))
-            }
+            Some(
+                request @ (RequestItem::Block(_) | RequestItem::RejectTx(_)),
+            ) => return Poll::Ready(Some(BatchedRequestItem::Single(request))),
             Some(RequestItem::Tx(txid, in_mempool)) => {
                 NonEmpty::new((txid, in_mempool))
             }
@@ -125,6 +127,7 @@ impl Stream for RequestQueue {
 #[derive(Clone, Debug)]
 enum ResponseItem {
     Block(bip300301::client::Block),
+    RejectTx,
     /// Bool indicating if the tx is a mempool tx.
     /// `false` if the tx is needed as a dependency for a mempool tx
     Tx(Transaction, bool),
@@ -180,6 +183,16 @@ async fn batched_request(
         BatchedRequestItem::Single(RequestItem::Block(block_hash)) => {
             let block = rpc_client.getblock(block_hash, Some(1)).await?;
             let resp = ResponseItem::Block(block);
+            Ok(BatchedResponseItem::Single(resp))
+        }
+        BatchedRequestItem::Single(RequestItem::RejectTx(txid)) => {
+            const NEGATIVE_MAX_SATS: i64 = -(21_000_000 * 100_000_000);
+            // set priority fee to extremely negative so that it is cleared
+            // from mempool as soon as possible
+            let _: bool = rpc_client
+                .prioritize_transaction(txid, NEGATIVE_MAX_SATS)
+                .await?;
+            let resp = ResponseItem::RejectTx;
             Ok(BatchedResponseItem::Single(resp))
         }
         BatchedRequestItem::Single(RequestItem::Tx(txid, in_mempool)) => {

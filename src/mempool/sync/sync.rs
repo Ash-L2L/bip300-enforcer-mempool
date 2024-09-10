@@ -10,6 +10,7 @@ use bitcoin::{
 use educe::Educe;
 use futures::{stream, StreamExt as _, TryFutureExt as _};
 use hashlink::LinkedHashSet;
+use imbl::HashSet;
 use thiserror::Error;
 use tokio::{spawn, sync::RwLock, task::JoinHandle};
 
@@ -25,6 +26,8 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub struct SyncState {
+    /// Txs rejected by the CUSF enforcer
+    rejected_txs: HashSet<Txid>,
     request_queue: RequestQueue,
     seq_message_queue: VecDeque<SequenceMessage>,
     /// Txs not needed in mempool, but requested in order to determine fees
@@ -162,17 +165,24 @@ where
             txid: input_txid,
             vout,
         } = input.previous_output;
-        let input_tx =
-            if let Some(input_tx) = sync_state.tx_cache.get(&input_txid) {
-                input_tx
-            } else if let Some((input_tx, _)) = mempool.txs.0.get(&input_txid) {
-                input_tx
-            } else {
-                tracing::trace!("Need {input_txid} for {txid}");
-                value_in = None;
-                input_txs_needed.push(input_txid);
-                continue;
-            };
+        let input_tx = if sync_state.rejected_txs.contains(&input_txid) {
+            // Reject tx
+            tracing::trace!("rejecting {txid}: rejected ancestor");
+            sync_state.rejected_txs.insert(*txid);
+            sync_state
+                .request_queue
+                .push_front(RequestItem::RejectTx(*txid));
+            return Ok(true);
+        } else if let Some(input_tx) = sync_state.tx_cache.get(&input_txid) {
+            input_tx
+        } else if let Some((input_tx, _)) = mempool.txs.0.get(&input_txid) {
+            input_tx
+        } else {
+            tracing::trace!("Need {input_txid} for {txid}");
+            value_in = None;
+            input_txs_needed.push(input_txid);
+            continue;
+        };
         let value = input_tx.output[vout as usize].value;
         value_in = value_in.map(|value_in| value_in + value);
     }
@@ -194,9 +204,11 @@ where
         mempool.insert(tx.clone(), fee_delta.to_sat())?;
         tracing::trace!("added {txid} to mempool");
     } else {
-        // FIXME: reject tx
-        todo!();
         tracing::trace!("rejecting {txid}");
+        sync_state.rejected_txs.insert(*txid);
+        sync_state
+            .request_queue
+            .push_front(RequestItem::RejectTx(*txid));
     }
     let mempool_txs = mempool.txs.0.len();
     tracing::debug!(%mempool_txs, "Syncing...");
@@ -309,6 +321,7 @@ where
                     .push_front(RequestItem::Tx(input_txid, false))
             }
         }
+        BatchedResponseItem::Single(ResponseItem::RejectTx) => {}
     }
     while try_apply_next_seq_message(enforcer, &mut mempool_write, sync_state)?
     {

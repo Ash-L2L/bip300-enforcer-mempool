@@ -339,6 +339,7 @@ fn handle_resp(
                     .push_front(RequestItem::Tx(input_txid, false))
             }
         }
+        BatchedResponseItem::Single(ResponseItem::RejectTx) => {}
     }
     while try_apply_next_seq_message(sync_state)? {}
     Ok(())
