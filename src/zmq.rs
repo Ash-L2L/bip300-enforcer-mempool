@@ -65,7 +65,7 @@ impl TryFrom<ZmqMessage> for SequenceMessage {
 
     fn try_from(msg: ZmqMessage) -> Result<Self, Self::Error> {
         let msgs = &msg.into_vec();
-        let Some(b"sequence") = msgs.get(0).map(|msg| &**msg) else {
+        let Some(b"sequence") = msgs.first().map(|msg| &**msg) else {
             return Err(Self::Error::MissingPrefix);
         };
         let Some((hash, rest)) =

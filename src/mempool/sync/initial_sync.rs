@@ -1,6 +1,9 @@
 //! Initial mempool sync
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, VecDeque},
+};
 
 use bip300301::{
     bitcoin::hashes::Hash as _,
@@ -93,15 +96,19 @@ fn handle_seq_message(
             zmq_seq: _,
         } => {
             if let Some(first_mempool_seq) = sync_state.first_mempool_sequence {
-                if mempool_seq < first_mempool_seq {
-                    // Ignore
-                    return Ok(());
-                } else if mempool_seq == first_mempool_seq {
-                    sync_state.first_mempool_sequence = None;
-                } else {
-                    return Err(SyncMempoolError::FirstMempoolSequence(
-                        first_mempool_seq,
-                    ));
+                match mempool_seq.cmp(&first_mempool_seq) {
+                    Ordering::Less => {
+                        // Ignore
+                        return Ok(());
+                    }
+                    Ordering::Equal => {
+                        sync_state.first_mempool_sequence = None;
+                    }
+                    Ordering::Greater => {
+                        return Err(SyncMempoolError::FirstMempoolSequence(
+                            first_mempool_seq,
+                        ))
+                    }
                 }
             }
             // FIXME: remove
@@ -119,15 +126,19 @@ fn handle_seq_message(
             if let Some(first_mempool_sequence) =
                 sync_state.first_mempool_sequence
             {
-                if mempool_seq < first_mempool_sequence {
-                    // Ignore
-                    return Ok(());
-                } else if mempool_seq == first_mempool_sequence {
-                    sync_state.first_mempool_sequence = None;
-                } else {
-                    return Err(SyncMempoolError::FirstMempoolSequence(
-                        first_mempool_sequence,
-                    ));
+                match mempool_seq.cmp(&first_mempool_sequence) {
+                    Ordering::Less => {
+                        // Ignore
+                        return Ok(());
+                    }
+                    Ordering::Equal => {
+                        sync_state.first_mempool_sequence = None;
+                    }
+                    Ordering::Greater => {
+                        return Err(SyncMempoolError::FirstMempoolSequence(
+                            first_mempool_sequence,
+                        ))
+                    }
                 }
             }
             tracing::debug!("Remove tx {txid} from req queue");
@@ -168,9 +179,8 @@ fn handle_resp_block(
                 // FIXME: insert without info
                 let () = todo!();
             }
-            sync_state.mempool.chain.tip = block
-                .previousblockhash
-                .unwrap_or_else(|| BlockHash::all_zeros());
+            sync_state.mempool.chain.tip =
+                block.previousblockhash.unwrap_or_else(BlockHash::all_zeros);
             sync_state.seq_message_queue.pop_front();
         }
         Some(_) | None => (),
@@ -257,7 +267,7 @@ fn try_apply_next_seq_message(
                 }
                 sync_state.mempool.chain.tip = block
                     .previousblockhash
-                    .unwrap_or_else(|| BlockHash::all_zeros());
+                    .unwrap_or_else(BlockHash::all_zeros);
                 true
             }
             Some(SequenceMessage::TxHashAdded {
@@ -316,7 +326,7 @@ fn handle_resp(
         BatchedResponseItem::Single(ResponseItem::Block(block)) => {
             // FIXME: remove
             tracing::debug!("Handling block {}", block.hash);
-            let () = handle_resp_block(sync_state, block)?;
+            let () = handle_resp_block(sync_state, *block)?;
         }
         BatchedResponseItem::Single(ResponseItem::Tx(tx, in_mempool)) => {
             let mut input_txs_needed = LinkedHashSet::new();
@@ -329,7 +339,7 @@ fn handle_resp(
                     }
                 }
             }
-            let () = handle_resp_tx(sync_state, tx);
+            let () = handle_resp_tx(sync_state, *tx);
             sync_state
                 .txs_needed
                 .extend(input_txs_needed.iter().copied());

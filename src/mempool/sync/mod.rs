@@ -28,10 +28,10 @@ use thiserror::Error;
 use crate::zmq::{SequenceMessage, SequenceStreamError};
 
 mod initial_sync;
-mod sync;
+mod task;
 
 pub use initial_sync::init_sync_mempool;
-pub use sync::MempoolSync;
+pub use task::MempoolSync;
 
 /// Items requested while syncing
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -147,11 +147,11 @@ impl Stream for RequestQueue {
 /// Responses received while syncing
 #[derive(Clone, Debug)]
 enum ResponseItem {
-    Block(bip300301::client::Block),
+    Block(Box<bip300301::client::Block>),
     RejectTx,
     /// Bool indicating if the tx is a mempool tx.
     /// `false` if the tx is needed as a dependency for a mempool tx
-    Tx(Transaction, bool),
+    Tx(Box<Transaction>, bool),
 }
 
 /// Responses received while syncing
@@ -223,7 +223,7 @@ async fn batched_request(
         }
         BatchedRequestItem::Single(RequestItem::Block(block_hash)) => {
             let block = rpc_client.getblock(block_hash, Some(1)).await?;
-            let resp = ResponseItem::Block(block);
+            let resp = ResponseItem::Block(Box::new(block));
             Ok(BatchedResponseItem::Single(resp))
         }
         BatchedRequestItem::Single(RequestItem::RejectTx(txid)) => {
@@ -245,7 +245,7 @@ async fn batched_request(
                 .await?;
             let tx: Transaction =
                 bitcoin::consensus::encode::deserialize_hex(&tx_hex)?;
-            let resp = ResponseItem::Tx(tx, in_mempool);
+            let resp = ResponseItem::Tx(Box::new(tx), in_mempool);
             Ok(BatchedResponseItem::Single(resp))
         }
     }

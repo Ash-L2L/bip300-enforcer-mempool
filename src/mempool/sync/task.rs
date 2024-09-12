@@ -134,9 +134,8 @@ fn handle_resp_block(
                 // FIXME: insert without info
                 let () = todo!();
             }
-            mempool.chain.tip = block
-                .previousblockhash
-                .unwrap_or_else(|| BlockHash::all_zeros());
+            mempool.chain.tip =
+                block.previousblockhash.unwrap_or_else(BlockHash::all_zeros);
             sync_state.seq_message_queue.pop_front();
         }
         Some(_) | None => (),
@@ -239,7 +238,7 @@ where
                 }
                 mempool.chain.tip = block
                     .previousblockhash
-                    .unwrap_or_else(|| BlockHash::all_zeros());
+                    .unwrap_or_else(BlockHash::all_zeros);
                 true
             }
             Some(SequenceMessage::TxHashAdded {
@@ -301,7 +300,7 @@ where
         BatchedResponseItem::Single(ResponseItem::Block(block)) => {
             // FIXME: remove
             tracing::debug!("Handling block {}", block.hash);
-            let () = handle_resp_block(&mut mempool_write, sync_state, block)?;
+            let () = handle_resp_block(&mut mempool_write, sync_state, *block)?;
         }
         BatchedResponseItem::Single(ResponseItem::Tx(tx, in_mempool)) => {
             let mut input_txs_needed = LinkedHashSet::new();
@@ -314,7 +313,7 @@ where
                     }
                 }
             }
-            let () = handle_resp_tx(sync_state, tx);
+            let () = handle_resp_tx(sync_state, *tx);
             for input_txid in input_txs_needed.into_iter().rev() {
                 sync_state
                     .request_queue

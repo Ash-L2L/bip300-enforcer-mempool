@@ -70,6 +70,7 @@ pub struct MissingDescendantError {
 #[error("Missing descendants key: {0}")]
 pub struct MissingDescendantsKeyError(Txid);
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Error)]
 pub enum MempoolInsertError {
     #[error(transparent)]
@@ -84,6 +85,7 @@ pub enum MempoolInsertError {
 #[error("Missing by_ancestor_fee_rate key: {0:?}")]
 pub struct MissingByAncestorFeeRateKeyError(FeeRate);
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Error)]
 pub enum MempoolRemoveError {
     #[error(transparent)]
