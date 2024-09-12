@@ -1,0 +1,23 @@
+[package]
+name = "cusf-enforcer-mempool-demo"
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = "1.0.86"
+bip300301 ={ workspace = true, features = ["tracing"] }
+bitcoin = { version = "0.32.2", features = ["serde"] }
+clap = { version = "4.5.15", features = ["derive"] }
+cusf-enforcer-mempool = { path = "../lib" }
+jsonrpsee = { version = "0.24.3", features = ["macros", "server"] }
+tokio = { version = "1.38.0", features = ["rt-multi-thread"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cusf-enforcer-mempool-demo"
+path = "main.rs"

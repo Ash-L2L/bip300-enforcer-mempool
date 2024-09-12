@@ -1,20 +1,19 @@
 use std::net::SocketAddr;
 
-use anyhow::Ok;
 use bip300301::{jsonrpsee::http_client::HttpClientBuilder, MainClient as _};
 use bitcoin::{hashes::Hash, BlockHash};
 use clap::Parser;
-use cusf_enforcer::DefaultEnforcer;
 use jsonrpsee::server::ServerHandle;
-use mempool::MempoolSync;
 use tokio::time::Duration;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
+use cusf_enforcer_mempool::{
+    cusf_enforcer::DefaultEnforcer,
+    mempool::{self, MempoolSync},
+    server, zmq,
+};
+
 mod cli;
-mod cusf_enforcer;
-mod mempool;
-mod server;
-mod zmq;
 
 // Configure logger.
 fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {

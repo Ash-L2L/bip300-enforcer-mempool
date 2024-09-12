@@ -1,0 +1,36 @@
+[package]
+name = "cusf-enforcer-mempool"
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.81"
+bip300301 ={ workspace = true, features = ["tracing"] }
+bitcoin = { version = "0.32.2", features = ["serde"] }
+blake3 = "1.5.3"
+borsh = "1.5.1"
+chrono = "0.4.38"
+educe = "0.6.0"
+either = "1.13.0"
+futures = "0.3.30"
+hashlink = "0.9.1"
+imbl = "3.0.0"
+indexmap = "2.4.0"
+jsonrpsee = { version = "0.24.3", features = ["macros"] }
+lending-iterator = "0.1.7"
+nonempty = "0.10.0"
+parking_lot = "0.12.3"
+serde = { version = "1.0.208", features = ["derive"] }
+thiserror = "1.0.63"
+tokio = "1.38.0"
+tracing = "0.1.40"
+zeromq = "0.4.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "cusf_enforcer_mempool"
+path = "lib.rs"

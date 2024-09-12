@@ -209,36 +209,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bip300-enforcer-mempool"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bip300301",
- "bitcoin",
- "blake3",
- "borsh",
- "chrono",
- "clap",
- "educe",
- "either",
- "futures",
- "hashlink",
- "imbl",
- "indexmap 2.4.0",
- "jsonrpsee 0.24.3",
- "lending-iterator",
- "nonempty",
- "parking_lot",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zeromq",
-]
-
-[[package]]
 name = "bip300301"
 version = "0.1.1"
 source = "git+https://github.com/Ash-L2L/bip300301.git?rev=4ec0175093b072d4d0a523321b7bb35e3fc96ccf#4ec0175093b072d4d0a523321b7bb35e3fc96ccf"
@@ -526,6 +496,49 @@ checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "cusf-enforcer-mempool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bip300301",
+ "bitcoin",
+ "blake3",
+ "borsh",
+ "chrono",
+ "educe",
+ "either",
+ "futures",
+ "hashlink",
+ "imbl",
+ "indexmap 2.4.0",
+ "jsonrpsee 0.24.3",
+ "lending-iterator",
+ "nonempty",
+ "parking_lot",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zeromq",
+]
+
+[[package]]
+name = "cusf-enforcer-mempool-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bip300301",
+ "bitcoin",
+ "clap",
+ "cusf-enforcer-mempool",
+ "jsonrpsee 0.24.3",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
