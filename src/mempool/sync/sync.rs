@@ -321,7 +321,8 @@ where
                     .push_front(RequestItem::Tx(input_txid, false))
             }
         }
-        BatchedResponseItem::Single(ResponseItem::RejectTx) => {}
+        BatchedResponseItem::BatchRejectTx
+        | BatchedResponseItem::Single(ResponseItem::RejectTx) => {}
     }
     while try_apply_next_seq_message(enforcer, &mut mempool_write, sync_state)?
     {
@@ -338,7 +339,31 @@ async fn task<Enforcer>(
 where
     Enforcer: CusfEnforcer,
 {
+    // Filter mempool with enforcer
+    let rejected_txs: Vec<Txid> = {
+        let mut mempool_write = mempool.write().await;
+        let rejected_txs = mempool_write
+            .try_filter(|tx| enforcer.accept_tx(tx))
+            .map_err(|err| match err {
+                either::Either::Left(mempool_remove_err) => {
+                    SyncTaskError::MempoolRemove(mempool_remove_err)
+                }
+                either::Either::Right(enforcer_err) => {
+                    SyncTaskError::CusfEnforcer(enforcer_err)
+                }
+            })?
+            .keys()
+            .copied()
+            .collect();
+        drop(mempool_write);
+        rejected_txs
+    };
     let mut sync_state = SyncState::default();
+    for rejected_txid in rejected_txs {
+        sync_state
+            .request_queue
+            .push_back(RequestItem::RejectTx(rejected_txid))
+    }
     let response_stream = sync_state
         .request_queue
         .clone()

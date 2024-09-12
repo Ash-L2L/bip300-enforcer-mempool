@@ -11,7 +11,7 @@ use bip300301::{
     jsonrpsee::{
         core::{
             client::ClientT as _,
-            params::{ArrayParams, BatchRequestBuilder},
+            params::{ArrayParams, BatchRequestBuilder, ObjectParams},
             ClientError as JsonRpcError,
         },
         http_client::HttpClient,
@@ -47,6 +47,7 @@ enum RequestItem {
 /// Batched items requested while syncing
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum BatchedRequestItem {
+    BatchRejectTx(NonEmpty<Txid>),
     /// Bool indicating if the tx is a mempool tx.
     /// `false` if the tx is needed as a dependency for a mempool tx
     BatchTx(NonEmpty<(Txid, bool)>),
@@ -99,27 +100,47 @@ impl Stream for RequestQueue {
     ) -> Poll<Option<Self::Item>> {
         let mut queue_lock = self.inner.queue.lock();
         *self.inner.waker.lock() = Some(cx.waker().clone());
-        let mut txids = match queue_lock.pop_front() {
-            Some(
-                request @ (RequestItem::Block(_) | RequestItem::RejectTx(_)),
-            ) => return Poll::Ready(Some(BatchedRequestItem::Single(request))),
-            Some(RequestItem::Tx(txid, in_mempool)) => {
-                NonEmpty::new((txid, in_mempool))
+        match queue_lock.pop_front() {
+            Some(request @ RequestItem::Block(_)) => {
+                Poll::Ready(Some(BatchedRequestItem::Single(request)))
             }
-            None => return Poll::Pending,
-        };
-        while let Some(&RequestItem::Tx(txid, in_mempool)) = queue_lock.front()
-        {
-            queue_lock.pop_front();
-            txids.push((txid, in_mempool));
+            Some(RequestItem::RejectTx(txid)) => {
+                let mut txids = NonEmpty::new(txid);
+                while let Some(&RequestItem::RejectTx(txid)) =
+                    queue_lock.front()
+                {
+                    queue_lock.pop_front();
+                    txids.push(txid);
+                }
+                let batched_request = if txids.tail.is_empty() {
+                    BatchedRequestItem::Single(RequestItem::RejectTx(
+                        txids.head,
+                    ))
+                } else {
+                    BatchedRequestItem::BatchRejectTx(txids)
+                };
+                Poll::Ready(Some(batched_request))
+            }
+            Some(RequestItem::Tx(txid, in_mempool)) => {
+                let mut txids = NonEmpty::new((txid, in_mempool));
+                while let Some(&RequestItem::Tx(txid, in_mempool)) =
+                    queue_lock.front()
+                {
+                    queue_lock.pop_front();
+                    txids.push((txid, in_mempool));
+                }
+                let batched_request = if txids.tail.is_empty() {
+                    let (txid, in_mempool) = txids.head;
+                    BatchedRequestItem::Single(RequestItem::Tx(
+                        txid, in_mempool,
+                    ))
+                } else {
+                    BatchedRequestItem::BatchTx(txids)
+                };
+                Poll::Ready(Some(batched_request))
+            }
+            None => Poll::Pending,
         }
-        let batched_request = if txids.tail.is_empty() {
-            let (txid, in_mempool) = txids.head;
-            BatchedRequestItem::Single(RequestItem::Tx(txid, in_mempool))
-        } else {
-            BatchedRequestItem::BatchTx(txids)
-        };
-        Poll::Ready(Some(batched_request))
     }
 }
 
@@ -136,6 +157,7 @@ enum ResponseItem {
 /// Responses received while syncing
 #[derive(Clone, Debug)]
 enum BatchedResponseItem {
+    BatchRejectTx,
     /// Bool indicating if the tx is a mempool tx.
     /// `false` if the tx is needed as a dependency for a mempool tx
     BatchTx(Vec<(Transaction, bool)>),
@@ -154,7 +176,26 @@ async fn batched_request(
     rpc_client: &HttpClient,
     request: BatchedRequestItem,
 ) -> Result<BatchedResponseItem, RequestError> {
+    const NEGATIVE_MAX_SATS: i64 = -(21_000_000 * 100_000_000);
     match request {
+        BatchedRequestItem::BatchRejectTx(txs) => {
+            let mut request = BatchRequestBuilder::new();
+            for txid in txs {
+                let mut params = ObjectParams::new();
+                params.insert("txid", txid).unwrap();
+                // set priority fee to extremely negative so that it is cleared
+                // from mempool as soon as possible
+                params.insert("fee_delta", NEGATIVE_MAX_SATS).unwrap();
+                request.insert("prioritisetransaction", params).unwrap();
+            }
+            let _resp: Vec<bool> = rpc_client
+                .batch_request(request)
+                .await?
+                .into_ok()
+                .map_err(|mut errs| JsonRpcError::from(errs.next().unwrap()))?
+                .collect();
+            Ok(BatchedResponseItem::BatchRejectTx)
+        }
         BatchedRequestItem::BatchTx(txs) => {
             let in_mempool = HashMap::<_, _>::from_iter(txs.iter().copied());
             let mut request = BatchRequestBuilder::new();
@@ -186,7 +227,6 @@ async fn batched_request(
             Ok(BatchedResponseItem::Single(resp))
         }
         BatchedRequestItem::Single(RequestItem::RejectTx(txid)) => {
-            const NEGATIVE_MAX_SATS: i64 = -(21_000_000 * 100_000_000);
             // set priority fee to extremely negative so that it is cleared
             // from mempool as soon as possible
             let _: bool = rpc_client

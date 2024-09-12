@@ -1,5 +1,5 @@
 use std::collections::{
-    btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet,
+    btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet, VecDeque,
 };
 
 use bip300301::{
@@ -15,15 +15,11 @@ use bitcoin::{
     absolute::Height, hashes::Hash as _, Amount, Block, BlockHash, Target,
     Transaction, Txid, Weight,
 };
-use futures::{
-    channel::mpsc,
-    future::{try_join, Either},
-    stream, StreamExt,
-};
+use futures::{channel::mpsc, future::try_join, stream, StreamExt};
 use hashlink::{LinkedHashMap, LinkedHashSet};
 use imbl::{ordmap, OrdMap, OrdSet};
 use indexmap::{IndexMap, IndexSet};
-use lending_iterator::LendingIterator;
+use lending_iterator::{prelude::HKT, LendingIterator};
 use thiserror::Error;
 
 use crate::zmq::{SequenceMessage, SequenceStream, SequenceStreamError};
@@ -474,6 +470,77 @@ impl Mempool {
         let res = self.txs.0.remove(txid);
         // FIXME: remove
         tracing::debug!("Removed {txid} from mempool");
+        Ok(res)
+    }
+
+    /// Remove a tx from mempool, and all descendants.
+    /// Returns the removed tx and descendants.
+    fn remove_with_descendants(
+        &mut self,
+        txid: &Txid,
+    ) -> Result<LinkedHashMap<Txid, Transaction>, MempoolRemoveError> {
+        let mut res = LinkedHashMap::new();
+        let mut remove_stack = VecDeque::from_iter([*txid]);
+        while let Some(next) = remove_stack.pop_front() {
+            let Some((tx, tx_info)) = self.remove(&next)? else {
+                continue;
+            };
+            remove_stack.extend(tx_info.spent_by);
+            res.replace(next, tx);
+        }
+        Ok(res)
+    }
+
+    /// Retain txs for which the provided closure returns `true`.
+    /// This function also deletes descendants of any deleted tx.
+    /// Returns the removed txs.
+    fn try_filter<F, E>(
+        &mut self,
+        mut f: F,
+    ) -> Result<
+        LinkedHashMap<Txid, Transaction>,
+        either::Either<MempoolRemoveError, E>,
+    >
+    where
+        F: FnMut(&Transaction) -> Result<bool, E>,
+    {
+        let no_ancestors_txids: Vec<Txid> = self
+            .txs
+            .0
+            .iter()
+            .filter_map(|(txid, (_tx, tx_info))| {
+                if tx_info.depends.is_empty() {
+                    Some(*txid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut res = LinkedHashMap::new();
+        for txid in no_ancestors_txids {
+            let mut descendants = Vec::<Txid>::new();
+            let () = self
+                .txs
+                .descendants_mut(txid)
+                .try_for_each(|item| {
+                    let (tx, _info) = item?;
+                    let descendant_txid = tx.compute_txid();
+                    descendants.push(descendant_txid);
+                    Result::<_, MempoolRemoveError>::Ok(())
+                })
+                .map_err(either::Either::Left)?;
+            'descs: for descendant_txid in descendants {
+                let Some((tx, _info)) = self.txs.0.get(&descendant_txid) else {
+                    continue 'descs;
+                };
+                if !f(tx).map_err(either::Either::Right)? {
+                    res.extend(
+                        self.remove_with_descendants(&descendant_txid)
+                            .map_err(either::Either::Left)?,
+                    );
+                }
+            }
+        }
         Ok(res)
     }
 
