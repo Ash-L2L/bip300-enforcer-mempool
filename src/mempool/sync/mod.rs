@@ -17,7 +17,7 @@ use bip300301::{
         http_client::HttpClient,
     },
 };
-use bitcoin::{Amount, BlockHash, Transaction, Txid};
+use bitcoin::{BlockHash, Transaction, Txid};
 
 use futures::Stream;
 use hashlink::LinkedHashSet;

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
 use anyhow::Ok;
 use bip300301::MainClient as _;
@@ -7,7 +7,7 @@ use clap::Parser;
 use cusf_enforcer::DefaultEnforcer;
 use jsonrpsee::server::ServerHandle;
 use mempool::MempoolSync;
-use tokio::{sync::Mutex, time::Duration};
+use tokio::time::Duration;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
 mod cli;

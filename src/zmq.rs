@@ -1,6 +1,4 @@
-use std::cmp::Ordering;
-
-use bitcoin::{hashes::Hash as _, hex::DisplayHex as _, BlockHash, Txid};
+use bitcoin::{hashes::Hash as _, BlockHash, Txid};
 use futures::{
     stream::{self, BoxStream},
     Stream, StreamExt, TryStreamExt as _,

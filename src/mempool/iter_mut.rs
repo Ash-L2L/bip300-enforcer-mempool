@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use bitcoin::{Transaction, Txid};
 use lending_iterator::prelude::*;

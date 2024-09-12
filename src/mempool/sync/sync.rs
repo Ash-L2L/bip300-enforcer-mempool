@@ -130,7 +130,7 @@ fn handle_resp_block(
         Some(SequenceMessage::BlockHashDisconnected(block_hash, _))
             if *block_hash == block.hash && mempool.chain.tip == block.hash =>
         {
-            for txid in &block.tx {
+            for _txid in &block.tx {
                 // FIXME: insert without info
                 let () = todo!();
             }
@@ -233,7 +233,7 @@ where
                 let Some(block) = mempool.chain.blocks.get(block_hash) else {
                     break 'res false;
                 };
-                for txid in &block.tx {
+                for _txid in &block.tx {
                     // FIXME: insert without info
                     let () = todo!();
                 }

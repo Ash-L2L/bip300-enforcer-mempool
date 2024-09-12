@@ -164,7 +164,7 @@ fn handle_resp_block(
             if *block_hash == block.hash
                 && sync_state.mempool.chain.tip == block.hash =>
         {
-            for txid in &block.tx {
+            for _txid in &block.tx {
                 // FIXME: insert without info
                 let () = todo!();
             }
@@ -251,7 +251,7 @@ fn try_apply_next_seq_message(
                 else {
                     break 'res false;
                 };
-                for txid in &block.tx {
+                for _txid in &block.tx {
                     // FIXME: insert without info
                     let () = todo!();
                 }

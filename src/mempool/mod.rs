@@ -1,28 +1,12 @@
-use std::collections::{
-    btree_map, hash_map, BTreeMap, BTreeSet, HashMap, HashSet, VecDeque,
-};
+use std::collections::VecDeque;
 
-use bip300301::{
-    bitcoin::hashes::Hash as _,
-    client::{
-        BlockTemplateTransaction, GetRawMempoolClient as _,
-        GetRawTransactionClient as _, GetRawTransactionVerbose,
-        MainClient as _, RawMempoolTxFees, RawMempoolTxInfo, RawMempoolVerbose,
-    },
-    jsonrpsee::{core::ClientError as JsonRpcError, http_client::HttpClient},
-};
-use bitcoin::{
-    absolute::Height, hashes::Hash as _, Amount, Block, BlockHash, Target,
-    Transaction, Txid, Weight,
-};
-use futures::{channel::mpsc, future::try_join, stream, StreamExt};
+use bip300301::client::{BlockTemplateTransaction, RawMempoolTxFees};
+use bitcoin::{BlockHash, Target, Transaction, Txid, Weight};
 use hashlink::{LinkedHashMap, LinkedHashSet};
 use imbl::{ordmap, OrdMap, OrdSet};
-use indexmap::{IndexMap, IndexSet};
-use lending_iterator::{prelude::HKT, LendingIterator};
+use indexmap::IndexSet;
+use lending_iterator::LendingIterator as _;
 use thiserror::Error;
-
-use crate::zmq::{SequenceMessage, SequenceStream, SequenceStreamError};
 
 pub mod iter;
 pub mod iter_mut;
@@ -309,91 +293,6 @@ impl Mempool {
         info.fees.descendant = descendant_fees;
         info.ancestor_size = ancestor_size;
         info.descendant_size = descendant_size;
-        let ancestor_fee_rate = FeeRate {
-            fee: ancestor_fees,
-            size: ancestor_size,
-        };
-        self.by_ancestor_fee_rate.insert(ancestor_fee_rate, txid);
-        Ok(res)
-    }
-
-    /// Insert with info already computed. For use during initial sync only.
-    /// All ancestors must exist in the mempool.
-    /// Descendants must not exist.
-    fn insert_with_info(
-        &mut self,
-        tx: Transaction,
-        info: RawMempoolTxInfo,
-    ) -> Result<Option<TxInfo>, MempoolInsertError> {
-        let txid = tx.compute_txid();
-        let RawMempoolTxInfo {
-            vsize,
-            weight: _,
-            descendant_count: _,
-            descendant_size: _,
-            ancestor_count: _,
-            ancestor_size,
-            wtxid: _,
-            fees,
-            depends,
-            spent_by: _,
-            bip125_replaceable,
-            unbroadcast: _,
-        } = info;
-        let depends = depends.into_iter().collect();
-        for dep in &depends {
-            self.txs
-                .0
-                .get_mut(dep)
-                .ok_or(MissingAncestorError {
-                    tx: txid,
-                    missing: *dep,
-                })?
-                .1
-                .spent_by
-                .insert(txid);
-        }
-        let info = TxInfo {
-            ancestor_size,
-            bip125_replaceable,
-            depends,
-            descendant_size: vsize,
-            fees: RawMempoolTxFees {
-                descendant: fees.modified,
-                ..fees
-            },
-            spent_by: OrdSet::new(),
-        };
-        let modified_fees = info.fees.modified;
-        let res = self.txs.0.insert(txid, (tx, info)).map(|(_, info)| info);
-        let (mut ancestor_size, mut ancestor_fees) = (0, 0);
-        self.txs.ancestors_mut(txid).try_for_each(|ancestor_info| {
-            let (ancestor_tx, ancestor_info) = ancestor_info?;
-            ancestor_size += ancestor_tx.vsize() as u64;
-            ancestor_fees += ancestor_info.fees.modified;
-            ancestor_info.descendant_size += vsize;
-            ancestor_info.fees.descendant += modified_fees;
-            Result::<_, MempoolInsertError>::Ok(())
-        })?;
-        let (_, info) = self.txs.0.get_mut(&txid).unwrap();
-        if ancestor_size != info.ancestor_size {
-            tracing::warn!(
-                %txid,
-                calculated = %ancestor_size,
-                provided = %info.ancestor_size,
-                "Calculated ancestor size does not match provided size"
-            );
-            info.ancestor_size = ancestor_size;
-        }
-        if ancestor_fees != info.fees.ancestor {
-            tracing::warn!(
-                %txid,
-                calculated = %ancestor_fees,
-                provided = %info.fees.ancestor,
-                "Calculated ancestor fees do not match provided fees"
-            );
-            info.fees.ancestor = ancestor_fees;
-        }
         let ancestor_fee_rate = FeeRate {
             fee: ancestor_fees,
             size: ancestor_size,
