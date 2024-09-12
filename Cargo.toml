@@ -30,7 +30,7 @@ zeromq = "0.4.0"
 
 [dependencies.bip300301]
 git = "https://github.com/Ash-L2L/bip300301.git"
-rev = "b2c248b363705e09993a6f4965519232f6e7eb8c"
+rev = "4ec0175093b072d4d0a523321b7bb35e3fc96ccf"
 features = ["tracing"]
 
 [lints.clippy]

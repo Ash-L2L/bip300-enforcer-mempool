@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Ok;
-use bip300301::MainClient as _;
+use bip300301::{jsonrpsee::http_client::HttpClientBuilder, MainClient as _};
 use bitcoin::{hashes::Hash, BlockHash};
 use clap::Parser;
 use cusf_enforcer::DefaultEnforcer;
@@ -48,11 +48,21 @@ async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     set_tracing_subscriber(cli.log_level)?;
     let (rpc_client, network_info) = {
+        // A mempool of default size might contain >300k txs.
+        // batch Requesting 300k txs requires ~30MiB,
+        // so 100MiB should be enough
+        const MAX_REQUEST_SIZE: u32 = 100 * (1 << 20);
+        // Default mempool size is 300MB, so 1GiB should be enough
+        const MAX_RESPONSE_SIZE: u32 = 1 << 30;
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+        let client_builder = HttpClientBuilder::default()
+            .max_request_size(MAX_REQUEST_SIZE)
+            .max_response_size(MAX_RESPONSE_SIZE)
+            .request_timeout(REQUEST_TIMEOUT);
         let client = bip300301::client(
             cli.node_rpc_addr,
+            Some(client_builder),
             &cli.node_rpc_pass,
-            Some(REQUEST_TIMEOUT),
             &cli.node_rpc_user,
         )?;
         // get network info to check that RPC client is configured correctly
