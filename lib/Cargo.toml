@@ -18,7 +18,7 @@ futures = "0.3.30"
 hashlink = "0.9.1"
 imbl = "3.0.0"
 indexmap = "2.4.0"
-jsonrpsee = { version = "0.24.3", features = ["macros"] }
+jsonrpsee = { version = "0.24.3", features = ["macros", "server"] }
 lending-iterator = "0.1.7"
 nonempty = "0.10.0"
 parking_lot = "0.12.3"
