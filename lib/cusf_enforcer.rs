@@ -1,15 +1,20 @@
-use bitcoin::Transaction;
+use std::{borrow::Borrow, collections::HashMap, convert::Infallible};
+
+use bitcoin::{Transaction, Txid};
 use either::Either;
-use thiserror::Error;
 
 pub trait CusfEnforcer {
     type AcceptTxError: std::error::Error + Send + Sync + 'static;
 
-    /// Return `true` to accept the tx, or `false` to reject it
-    fn accept_tx(
+    /// Return `true` to accept the tx, or `false` to reject it.
+    /// Inputs to a tx are always available.
+    fn accept_tx<TxRef>(
         &mut self,
         tx: &Transaction,
-    ) -> Result<bool, Self::AcceptTxError>;
+        tx_inputs: &HashMap<Txid, TxRef>,
+    ) -> Result<bool, Self::AcceptTxError>
+    where
+        TxRef: Borrow<Transaction>;
 }
 
 /// Compose two [`CusfEnforcer`]s, left-before-right
@@ -23,12 +28,16 @@ where
 {
     type AcceptTxError = Either<C0::AcceptTxError, C1::AcceptTxError>;
 
-    fn accept_tx(
+    fn accept_tx<TxRef>(
         &mut self,
         tx: &Transaction,
-    ) -> Result<bool, Self::AcceptTxError> {
-        if self.0.accept_tx(tx).map_err(Either::Left)? {
-            self.1.accept_tx(tx).map_err(Either::Right)
+        tx_inputs: &HashMap<Txid, TxRef>,
+    ) -> Result<bool, Self::AcceptTxError>
+    where
+        TxRef: Borrow<Transaction>,
+    {
+        if self.0.accept_tx(tx, tx_inputs).map_err(Either::Left)? {
+            self.1.accept_tx(tx, tx_inputs).map_err(Either::Right)
         } else {
             Ok(false)
         }
@@ -39,16 +48,17 @@ where
 
 pub struct DefaultEnforcer;
 
-#[derive(Clone, Copy, Debug, Error)]
-pub enum NeverError {}
-
 impl CusfEnforcer for DefaultEnforcer {
-    type AcceptTxError = NeverError;
+    type AcceptTxError = Infallible;
 
-    fn accept_tx(
+    fn accept_tx<TxRef>(
         &mut self,
         _tx: &Transaction,
-    ) -> Result<bool, Self::AcceptTxError> {
+        _tx_inputs: &HashMap<Txid, TxRef>,
+    ) -> Result<bool, Self::AcceptTxError>
+    where
+        TxRef: Borrow<Transaction>,
+    {
         Ok(true)
     }
 }

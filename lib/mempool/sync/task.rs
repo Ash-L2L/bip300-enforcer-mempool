@@ -24,7 +24,7 @@ use crate::{
     zmq::{SequenceMessage, SequenceStream, SequenceStreamError},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SyncState {
     /// Txs rejected by the CUSF enforcer
     rejected_txs: HashSet<Txid>,
@@ -158,7 +158,8 @@ where
         return Ok(false);
     };
     let (mut value_in, value_out) = (Some(Amount::ZERO), Amount::ZERO);
-    let mut input_txs_needed = Vec::new();
+    let mut input_txs_needed = LinkedHashSet::new();
+    let mut input_txs = HashMap::<Txid, &Transaction>::new();
     for input in &tx.input {
         let OutPoint {
             txid: input_txid,
@@ -179,11 +180,12 @@ where
         } else {
             tracing::trace!("Need {input_txid} for {txid}");
             value_in = None;
-            input_txs_needed.push(input_txid);
+            input_txs_needed.replace(input_txid);
             continue;
         };
         let value = input_tx.output[vout as usize].value;
         value_in = value_in.map(|value_in| value_in + value);
+        input_txs.insert(input_txid, input_tx);
     }
     for input_txid in input_txs_needed.into_iter().rev() {
         sync_state
@@ -197,7 +199,7 @@ where
         return Err(SyncTaskError::FeeOverflow);
     };
     if enforcer
-        .accept_tx(tx)
+        .accept_tx(tx, &input_txs)
         .map_err(SyncTaskError::CusfEnforcer)?
     {
         mempool.insert(tx.clone(), fee_delta.to_sat())?;
@@ -332,6 +334,7 @@ where
 async fn task<Enforcer>(
     mut enforcer: Enforcer,
     mempool: Arc<RwLock<Mempool>>,
+    tx_cache: HashMap<Txid, Transaction>,
     rpc_client: HttpClient,
     sequence_stream: SequenceStream<'static>,
 ) -> Result<(), SyncTaskError<Enforcer>>
@@ -339,10 +342,21 @@ where
     Enforcer: CusfEnforcer,
 {
     // Filter mempool with enforcer
-    let rejected_txs: Vec<Txid> = {
+    let rejected_txs: LinkedHashSet<Txid> = {
         let mut mempool_write = mempool.write().await;
         let rejected_txs = mempool_write
-            .try_filter(|tx| enforcer.accept_tx(tx))
+            .try_filter(|tx, mempool_inputs| {
+                let mut tx_inputs = mempool_inputs.clone();
+                for tx_in in &tx.input {
+                    let input_txid = tx_in.previous_output.txid;
+                    if tx_inputs.contains_key(&input_txid) {
+                        continue;
+                    }
+                    let input_tx = &tx_cache[&input_txid];
+                    tx_inputs.insert(input_txid, input_tx);
+                }
+                enforcer.accept_tx(tx, &tx_inputs)
+            })
             .map_err(|err| match err {
                 either::Either::Left(mempool_remove_err) => {
                     SyncTaskError::MempoolRemove(mempool_remove_err)
@@ -357,12 +371,19 @@ where
         drop(mempool_write);
         rejected_txs
     };
-    let mut sync_state = SyncState::default();
-    for rejected_txid in rejected_txs {
-        sync_state
-            .request_queue
-            .push_back(RequestItem::RejectTx(rejected_txid))
-    }
+    let request_queue = RequestQueue::default();
+    let rejected_txs: HashSet<Txid> = rejected_txs
+        .into_iter()
+        .inspect(|rejected_txid| {
+            request_queue.push_back(RequestItem::RejectTx(*rejected_txid));
+        })
+        .collect();
+    let mut sync_state = SyncState {
+        rejected_txs,
+        request_queue,
+        seq_message_queue: VecDeque::new(),
+        tx_cache,
+    };
     let response_stream = sync_state
         .request_queue
         .clone()
@@ -405,6 +426,7 @@ impl MempoolSync {
     pub fn new<Enforcer>(
         enforcer: Enforcer,
         mempool: Mempool,
+        tx_cache: HashMap<Txid, Transaction>,
         rpc_client: &HttpClient,
         sequence_stream: SequenceStream<'static>,
     ) -> Self
@@ -416,6 +438,7 @@ impl MempoolSync {
             task(
                 enforcer,
                 mempool.clone(),
+                tx_cache,
                 rpc_client.clone(),
                 sequence_stream,
             )

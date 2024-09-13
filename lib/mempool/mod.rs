@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use bip300301::client::{BlockTemplateTransaction, RawMempoolTxFees};
 use bitcoin::{BlockHash, Target, Transaction, Txid, Weight};
@@ -393,6 +393,8 @@ impl Mempool {
     }
 
     /// Retain txs for which the provided closure returns `true`.
+    /// The closure's second argument is the in-mempool input txs for the
+    /// transaction.
     /// This function also deletes descendants of any deleted tx.
     /// Returns the removed txs.
     fn try_filter<F, E>(
@@ -403,7 +405,7 @@ impl Mempool {
         either::Either<MempoolRemoveError, E>,
     >
     where
-        F: FnMut(&Transaction) -> Result<bool, E>,
+        F: FnMut(&Transaction, &HashMap<Txid, &Transaction>) -> Result<bool, E>,
     {
         let no_ancestors_txids: Vec<Txid> = self
             .txs
@@ -434,7 +436,17 @@ impl Mempool {
                 let Some((tx, _info)) = self.txs.0.get(&descendant_txid) else {
                     continue 'descs;
                 };
-                if !f(tx).map_err(either::Either::Right)? {
+                let mut tx_inputs = HashMap::<Txid, &Transaction>::new();
+                'tx_inputs: for tx_in in &tx.input {
+                    let input_txid = tx_in.previous_output.txid;
+                    if tx_inputs.contains_key(&input_txid) {
+                        continue 'tx_inputs;
+                    }
+                    if let Some((input_tx, _)) = self.txs.0.get(&input_txid) {
+                        tx_inputs.insert(input_txid, input_tx);
+                    }
+                }
+                if !f(tx, &tx_inputs).map_err(either::Either::Right)? {
                     res.extend(
                         self.remove_with_descendants(&descendant_txid)
                             .map_err(either::Either::Left)?,

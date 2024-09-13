@@ -356,11 +356,12 @@ fn handle_resp(
     Ok(())
 }
 
+/// Returns the synced mempool, and the accumulated tx cache
 pub async fn init_sync_mempool(
     rpc_client: &HttpClient,
     sequence_stream: &mut SequenceStream<'_>,
     prev_blockhash: BlockHash,
-) -> Result<Mempool, SyncMempoolError> {
+) -> Result<(Mempool, HashMap<Txid, Transaction>), SyncMempoolError> {
     let RawMempoolWithSequence {
         txids,
         mempool_sequence,
@@ -421,5 +422,5 @@ pub async fn init_sync_mempool(
             }
         }
     }
-    Ok(sync_state.mempool)
+    Ok((sync_state.mempool, sync_state.tx_cache))
 }
