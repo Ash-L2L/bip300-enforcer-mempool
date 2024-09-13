@@ -30,7 +30,9 @@ use crate::zmq::{SequenceMessage, SequenceStreamError};
 mod initial_sync;
 mod task;
 
-pub use initial_sync::init_sync_mempool;
+pub use initial_sync::{
+    init_sync_mempool, SyncMempoolError as InitialSyncMempoolError,
+};
 pub use task::MempoolSync;
 
 /// Items requested while syncing

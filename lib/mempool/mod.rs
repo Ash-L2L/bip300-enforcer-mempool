@@ -12,7 +12,7 @@ pub mod iter;
 pub mod iter_mut;
 mod sync;
 
-pub use sync::{init_sync_mempool, MempoolSync};
+pub use sync::{init_sync_mempool, InitialSyncMempoolError, MempoolSync};
 
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct FeeRate {

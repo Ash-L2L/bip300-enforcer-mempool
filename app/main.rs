@@ -74,13 +74,10 @@ async fn main() -> anyhow::Result<()> {
     let mut sequence_stream =
         zmq::subscribe_sequence(&cli.node_zmq_addr_sequence).await?;
     let (mempool, tx_cache) = {
-        let prev_blockhash = BlockHash::from_byte_array(
-            sample_block_template.prev_blockhash.to_byte_array(),
-        );
         mempool::init_sync_mempool(
             &rpc_client,
             &mut sequence_stream,
-            prev_blockhash,
+            sample_block_template.prev_blockhash,
         )
         .await?
     };
